@@ -1,0 +1,30 @@
+strategy:
+  dte_min: 21
+  dte_max: 30
+  put_delta: 0.16
+  call_delta: 0.10
+  profit_take_pct: 0.80
+  stop_multiple: 2.00
+  force_exit_dte: 7
+  poll_seconds: 30
+risk:
+  dry_run: true
+  max_new_trades_per_day: 1
+  max_option_positions: 20
+  max_total_stop_risk: 25000
+  max_assignment_capital_per_symbol: 40000
+  allow_naked_calls: false
+  allow_earnings: false
+  require_confirmation: true
+  max_bid_ask_spread_pct: 0.15
+symbols:
+  - TSLA
+  - NVDA
+  - INTC
+  - RKLB
+persistence:
+  sqlite_path: ./option_sentinel.db
+schwab:
+  token_path: ./tokens/schwab_token.json
+  callback_url: https://127.0.0.1:8182
+  account_hash: null

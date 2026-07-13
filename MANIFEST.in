@@ -1,0 +1,5 @@
+include .env.example
+include config.example.yml
+include CONTRIBUTING.md
+include DISCLAIMER.md
+include SECURITY.md
