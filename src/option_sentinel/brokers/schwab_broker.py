@@ -9,7 +9,8 @@ from ..broker import Broker
 from ..config import AppConfig, resolve_path
 from ..models import OptionChain, OptionContract
 
-PRICE_HISTORY_CACHE_SECONDS = 300
+TRAILING_PRICE_HISTORY_CACHE_SECONDS = 1800
+INTRADAY_PRICE_HISTORY_CACHE_SECONDS = 300
 
 
 class SchwabBroker(Broker):
@@ -71,7 +72,9 @@ class SchwabBroker(Broker):
         normalized_days = max(1, days)
         end_datetime = datetime.now(timezone.utc)
         cached = self._price_history_cache.get((normalized_symbol, normalized_days))
-        if cached is not None and (end_datetime - cached[0]).total_seconds() < PRICE_HISTORY_CACHE_SECONDS:
+        if cached is not None and (
+            end_datetime - cached[0]
+        ).total_seconds() < TRAILING_PRICE_HISTORY_CACHE_SECONDS:
             return list(cached[1])
 
         start_datetime = end_datetime - timedelta(days=normalized_days)
@@ -112,7 +115,9 @@ class SchwabBroker(Broker):
         )
         cache_key = (normalized_symbol, normalized_interval, start_datetime.date())
         cached = self._intraday_price_history_cache.get(cache_key)
-        if cached is not None and (end_datetime - cached[0]).total_seconds() < PRICE_HISTORY_CACHE_SECONDS:
+        if cached is not None and (
+            end_datetime - cached[0]
+        ).total_seconds() < INTRADAY_PRICE_HISTORY_CACHE_SECONDS:
             return list(cached[1])
 
         helper_name = {

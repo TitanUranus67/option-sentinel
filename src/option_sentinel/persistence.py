@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from threading import Lock
+from typing import Any, Iterable, Iterator
 
 from .models import OrderDraft, TradeBatch, TradeSnapshot, TradeStatus
 
 
-def _connect(path: str | Path) -> sqlite3.Connection:
+@contextmanager
+def _connect(path: str | Path) -> Iterator[sqlite3.Connection]:
     db_path = Path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _dt(value: datetime) -> str:
@@ -38,55 +45,63 @@ def _local_day_utc_bounds(day: date | None = None) -> tuple[str, str]:
 class Repository:
     def __init__(self, sqlite_path: str | Path) -> None:
         self.sqlite_path = Path(sqlite_path)
+        self._initialized = False
+        self._init_lock = Lock()
 
     def init_db(self) -> None:
-        with _connect(self.sqlite_path) as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS trade_batches (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    expiration TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    put_symbol TEXT NOT NULL,
-                    put_strike REAL NOT NULL,
-                    call_symbol TEXT NOT NULL,
-                    call_strike REAL NOT NULL,
-                    original_credit REAL NOT NULL,
-                    opened_at TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    notes TEXT NOT NULL DEFAULT ''
-                );
+        if self._initialized:
+            return
+        with self._init_lock:
+            if self._initialized:
+                return
+            with _connect(self.sqlite_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS trade_batches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        expiration TEXT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        put_symbol TEXT NOT NULL,
+                        put_strike REAL NOT NULL,
+                        call_symbol TEXT NOT NULL,
+                        call_strike REAL NOT NULL,
+                        original_credit REAL NOT NULL,
+                        opened_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        notes TEXT NOT NULL DEFAULT ''
+                    );
 
-                CREATE TABLE IF NOT EXISTS trade_snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id INTEGER NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    underlying_price REAL,
-                    close_debit_mid REAL NOT NULL,
-                    close_debit_conservative REAL NOT NULL,
-                    pnl_mid REAL NOT NULL,
-                    profit_pct REAL NOT NULL,
-                    dte INTEGER NOT NULL,
-                    alert_state TEXT NOT NULL,
-                    FOREIGN KEY(trade_id) REFERENCES trade_batches(id)
-                );
+                    CREATE TABLE IF NOT EXISTS trade_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_id INTEGER NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        underlying_price REAL,
+                        close_debit_mid REAL NOT NULL,
+                        close_debit_conservative REAL NOT NULL,
+                        pnl_mid REAL NOT NULL,
+                        profit_pct REAL NOT NULL,
+                        dte INTEGER NOT NULL,
+                        alert_state TEXT NOT NULL,
+                        FOREIGN KEY(trade_id) REFERENCES trade_batches(id)
+                    );
 
-                CREATE TABLE IF NOT EXISTS order_drafts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_id INTEGER,
-                    created_at TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    order_json TEXT NOT NULL,
-                    estimated_price REAL NOT NULL,
-                    status TEXT NOT NULL,
-                    broker_order_id TEXT,
-                    broker_status TEXT,
-                    FOREIGN KEY(trade_id) REFERENCES trade_batches(id)
-                );
-                """
-            )
-            self._ensure_order_drafts_columns(conn)
+                    CREATE TABLE IF NOT EXISTS order_drafts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_id INTEGER,
+                        created_at TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        order_json TEXT NOT NULL,
+                        estimated_price REAL NOT NULL,
+                        status TEXT NOT NULL,
+                        broker_order_id TEXT,
+                        broker_status TEXT,
+                        FOREIGN KEY(trade_id) REFERENCES trade_batches(id)
+                    );
+                    """
+                )
+                self._ensure_order_drafts_columns(conn)
+            self._initialized = True
 
     @staticmethod
     def _ensure_order_drafts_columns(conn: sqlite3.Connection) -> None:

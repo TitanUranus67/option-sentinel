@@ -36,6 +36,7 @@ from .position_monitor import (
     total_today_pnl,
     total_position_theta,
 )
+from .refresh import BrokerRefreshCoordinator
 from .risk import validate_new_trade
 from .roll import RollCandidate, find_credit_roll_candidates
 from .strategy import find_candidate_strangles
@@ -55,6 +56,11 @@ OPEN_QUANTITY = 1
 ORDER_DRAFT_LIMIT = 100
 FULL_MONITOR_WIDTH = 138
 CHART_BLOCK_HEIGHT = 10
+CHART_REFRESH_SECONDS = 300
+REFRESH_MONITOR = "positions"
+REFRESH_ORDERS = "orders"
+REFRESH_CHARTS = "charts"
+BROKER_SPINNER_FRAMES = ("|", "/", "-", "\\")
 
 
 def run_monitor_tui(*, config: AppConfig, broker: Broker, repository: Repository) -> None:
@@ -82,229 +88,283 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     popup_selected = ACTION_CLOSE
     popup_ignore_enter_until = 0.0
     force_refresh = True
-    force_order_refresh = True
-    force_chart_refresh = True
+    force_order_refresh = False
+    force_chart_refresh = False
     dirty = True
     last_refresh = 0.0
+    last_order_refresh = 0.0
+    last_chart_refresh = 0.0
+    refresh = BrokerRefreshCoordinator()
 
-    while True:
-        now = time.monotonic()
-        if active_tab == TAB_MONITOR and (force_refresh or now - last_refresh >= config.strategy.poll_seconds):
-            try:
-                rows, order_rows, live_status_note = _build_monitor_rows_with_open_closing_orders(
-                    broker=broker,
-                    config=config,
-                    repository=repository,
-                )
-                selected = min(selected, max(0, len(rows) - 1))
-                status = _monitor_status(rows)
-                if live_status_note:
-                    status = f"{status} | orders {live_status_note}"
-            except Exception as exc:
-                status = f"Refresh failed: {exc}"
-            last_refresh = now
-            force_refresh = False
-            dirty = True
-
-        if active_tab == TAB_ORDERS and force_order_refresh:
-            try:
-                order_rows, live_status_note = _refresh_todays_order_rows(broker=broker, repository=repository)
-                order_selected = min(order_selected, max(0, len(order_rows) - 1))
-                order_status = f"{len(order_rows)} local order records today | refreshed {datetime.now().strftime('%H:%M:%S')}"
-                if live_status_note:
-                    order_status = f"{order_status} | {live_status_note}"
-            except Exception as exc:
-                order_status = f"Order refresh failed: {exc}"
-            force_order_refresh = False
-            dirty = True
-
-        if active_tab == TAB_CHARTS and force_chart_refresh:
-            try:
-                height, width = stdscr.getmaxyx()
-                chart_rows = build_monitor_rows(broker, config)
-                charts = build_intraday_charts(
-                    broker,
-                    config,
-                    chart_rows,
-                    interval_minutes=_chart_interval_for_width(width),
-                )
-                chart_lines = render_intraday_charts(
-                    charts,
-                    width=width,
-                    chart_height=_chart_height_for_terminal(height),
-                )
-                visible_rows = max(1, height - 5)
-                chart_scroll = min(chart_scroll, max(0, len(chart_lines) - visible_rows))
-                chart_status = f"{len(charts)} stock chart(s) | refreshed {datetime.now().strftime('%H:%M:%S')}"
-            except Exception as exc:
-                chart_lines = []
-                chart_status = f"Chart refresh failed: {exc}"
-            force_chart_refresh = False
-            dirty = True
-
-        if dirty:
-            height, _ = stdscr.getmaxyx()
-            visible_rows = max(1, height - 5)
-            if active_tab == TAB_MONITOR:
-                if selected < scroll:
-                    scroll = selected
-                if selected >= scroll + visible_rows:
-                    scroll = selected - visible_rows + 1
-                _draw(
-                    stdscr,
-                    rows,
-                    selected=selected,
-                    scroll=scroll,
-                    status=status,
-                    popup=popup,
-                    popup_selected=popup_selected,
-                    active_tab=active_tab,
-                )
-            elif active_tab == TAB_ORDERS:
-                if order_selected < order_scroll:
-                    order_scroll = order_selected
-                if order_selected >= order_scroll + visible_rows:
-                    order_scroll = order_selected - visible_rows + 1
-                _draw_orders(
-                    stdscr,
-                    order_rows,
-                    selected=order_selected,
-                    scroll=order_scroll,
-                    status=order_status,
-                    active_tab=active_tab,
-                )
-            elif active_tab == TAB_CHARTS:
-                chart_scroll = min(chart_scroll, max(0, len(chart_lines) - visible_rows))
-                _draw_charts(
-                    stdscr,
-                    chart_lines,
-                    scroll=chart_scroll,
-                    status=chart_status,
-                    active_tab=active_tab,
-                )
-            dirty = False
-
-        key = stdscr.getch()
-        if key == -1:
-            continue
-
-        if popup and active_tab == TAB_MONITOR:
-            if key in (27, ord("q"), curses.KEY_LEFT):
-                popup = False
-                dirty = True
-            elif key in (curses.KEY_UP, ord("k")):
-                popup_selected = max(0, popup_selected - 1)
-                dirty = True
-            elif key in (curses.KEY_DOWN, ord("j")):
-                popup_selected = min(len(ACTIONS) - 1, popup_selected + 1)
-                dirty = True
-            elif key in (10, 13, curses.KEY_ENTER):
-                if time.monotonic() < popup_ignore_enter_until:
-                    continue
-                if rows:
-                    row = rows[selected]
-                    if popup_selected == ACTION_CLOSE:
-                        status = _close_selected_option(stdscr, row, config=config, broker=broker, repository=repository)
-                    elif popup_selected == ACTION_ROLL:
-                        status = _show_roll_candidates(
-                            stdscr,
-                            row,
-                            config=config,
-                            broker=broker,
-                            repository=repository,
+    try:
+        while True:
+            completed = refresh.poll()
+            if completed is not None:
+                completed_at = time.monotonic()
+                refreshed_at = datetime.now()
+                if completed.kind == REFRESH_MONITOR:
+                    last_refresh = completed_at
+                    if completed.error is not None:
+                        status = f"Refresh failed: {completed.error}"
+                    else:
+                        last_order_refresh = completed_at
+                        rows, order_rows, live_status_note = completed.value
+                        selected = min(selected, max(0, len(rows) - 1))
+                        order_selected = min(order_selected, max(0, len(order_rows) - 1))
+                        status = _monitor_status(rows, refreshed_at=refreshed_at)
+                        if live_status_note:
+                            status = f"{status} | orders {live_status_note}"
+                        order_status = _order_refresh_status(order_rows, live_status_note, refreshed_at=refreshed_at)
+                elif completed.kind == REFRESH_ORDERS:
+                    last_order_refresh = completed_at
+                    if completed.error is not None:
+                        order_status = f"Order refresh failed: {completed.error}"
+                    else:
+                        order_rows, live_status_note = completed.value
+                        order_selected = min(order_selected, max(0, len(order_rows) - 1))
+                        order_status = _order_refresh_status(order_rows, live_status_note, refreshed_at=refreshed_at)
+                elif completed.kind == REFRESH_CHARTS:
+                    last_chart_refresh = completed_at
+                    if completed.error is not None:
+                        chart_status = f"Chart refresh failed: {completed.error}"
+                    else:
+                        chart_lines, chart_count = completed.value
+                        height, _ = stdscr.getmaxyx()
+                        visible_rows = max(1, height - 5)
+                        chart_scroll = min(chart_scroll, max(0, len(chart_lines) - visible_rows))
+                        chart_status = (
+                            f"{chart_count} stock chart(s) | refreshed {refreshed_at.strftime('%H:%M:%S')}"
                         )
+                dirty = True
+
+            now = time.monotonic()
+            if not refresh.waiting:
+                if active_tab == TAB_MONITOR and (
+                    force_refresh or last_refresh == 0.0 or now - last_refresh >= config.strategy.poll_seconds
+                ):
+                    if refresh.submit(
+                        REFRESH_MONITOR,
+                        lambda: _build_monitor_rows_with_open_closing_orders(
+                            broker=broker,
+                            config=config,
+                            repository=repository,
+                        ),
+                    ):
+                        force_refresh = False
+                        dirty = True
+                elif active_tab == TAB_ORDERS and (
+                    force_order_refresh
+                    or last_order_refresh == 0.0
+                    or now - last_order_refresh >= config.strategy.poll_seconds
+                ):
+                    if refresh.submit(
+                        REFRESH_ORDERS,
+                        lambda: _refresh_todays_order_rows(broker=broker, repository=repository),
+                    ):
+                        force_order_refresh = False
+                        dirty = True
+                elif active_tab == TAB_CHARTS and (
+                    force_chart_refresh
+                    or last_chart_refresh == 0.0
+                    or now - last_chart_refresh >= CHART_REFRESH_SECONDS
+                ):
+                    height, width = stdscr.getmaxyx()
+                    chart_rows = list(rows)
+                    if refresh.submit(
+                        REFRESH_CHARTS,
+                        lambda: _build_chart_refresh(
+                            broker=broker,
+                            config=config,
+                            rows=chart_rows,
+                            width=width,
+                            height=height,
+                        ),
+                    ):
+                        force_chart_refresh = False
+                        dirty = True
+
+            if dirty:
+                height, _ = stdscr.getmaxyx()
+                visible_rows = max(1, height - 5)
+                if active_tab == TAB_MONITOR:
+                    if selected < scroll:
+                        scroll = selected
+                    if selected >= scroll + visible_rows:
+                        scroll = selected - visible_rows + 1
+                    _draw(
+                        stdscr,
+                        rows,
+                        selected=selected,
+                        scroll=scroll,
+                        status=status,
+                        popup=popup,
+                        popup_selected=popup_selected,
+                        active_tab=active_tab,
+                    )
+                elif active_tab == TAB_ORDERS:
+                    if order_selected < order_scroll:
+                        order_scroll = order_selected
+                    if order_selected >= order_scroll + visible_rows:
+                        order_scroll = order_selected - visible_rows + 1
+                    _draw_orders(
+                        stdscr,
+                        order_rows,
+                        selected=order_selected,
+                        scroll=order_scroll,
+                        status=order_status,
+                        active_tab=active_tab,
+                    )
+                elif active_tab == TAB_CHARTS:
+                    chart_scroll = min(chart_scroll, max(0, len(chart_lines) - visible_rows))
+                    _draw_charts(
+                        stdscr,
+                        chart_lines,
+                        scroll=chart_scroll,
+                        status=chart_status,
+                        active_tab=active_tab,
+                    )
+                dirty = False
+
+            _draw_broker_spinner(
+                stdscr,
+                waiting=refresh.waiting,
+                frame=int(time.monotonic() * len(BROKER_SPINNER_FRAMES)),
+            )
+            key = stdscr.getch()
+            if key == -1:
+                continue
+
+            if popup and active_tab == TAB_MONITOR:
+                if key in (27, ord("q"), curses.KEY_LEFT):
+                    popup = False
+                    dirty = True
+                elif key in (curses.KEY_UP, ord("k")):
+                    popup_selected = max(0, popup_selected - 1)
+                    dirty = True
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    popup_selected = min(len(ACTIONS) - 1, popup_selected + 1)
+                    dirty = True
+                elif key in (10, 13, curses.KEY_ENTER):
+                    if time.monotonic() < popup_ignore_enter_until:
+                        continue
+                    if refresh.waiting:
+                        status = _broker_busy_message(refresh.waiting_kind)
+                        dirty = True
+                        continue
+                    if rows:
+                        row = rows[selected]
+                        if popup_selected == ACTION_CLOSE:
+                            status = _close_selected_option(
+                                stdscr,
+                                row,
+                                config=config,
+                                broker=broker,
+                                repository=repository,
+                            )
+                        elif popup_selected == ACTION_ROLL:
+                            status = _show_roll_candidates(
+                                stdscr,
+                                row,
+                                config=config,
+                                broker=broker,
+                                repository=repository,
+                            )
+                    popup = False
+                    dirty = True
+                continue
+
+            if key in (ord("q"), 27):
+                break
+            if _is_function_key(key, 1):
+                active_tab = TAB_MONITOR
                 popup = False
                 dirty = True
-            continue
-
-        if key in (ord("q"), 27):
-            break
-        if _is_function_key(key, 1):
-            active_tab = TAB_MONITOR
-            popup = False
-            force_refresh = True
-            dirty = True
-            continue
-        if _is_function_key(key, 2):
-            active_tab = TAB_ORDERS
-            popup = False
-            force_order_refresh = True
-            dirty = True
-            continue
-        if _is_function_key(key, 3):
-            active_tab = TAB_CHARTS
-            popup = False
-            force_chart_refresh = True
-            dirty = True
-            continue
-        if key == ord("r"):
-            if active_tab == TAB_MONITOR:
-                force_refresh = True
-            elif active_tab == TAB_ORDERS:
-                force_order_refresh = True
+                continue
+            if _is_function_key(key, 2):
+                active_tab = TAB_ORDERS
+                popup = False
                 dirty = True
-            elif active_tab == TAB_CHARTS:
-                force_chart_refresh = True
+                continue
+            if _is_function_key(key, 3):
+                active_tab = TAB_CHARTS
+                popup = False
                 dirty = True
-            continue
-        if active_tab == TAB_MONITOR and key in (ord("n"), ord("N")):
-            status = _open_new_strangle(stdscr, config=config, broker=broker, repository=repository)
-            dirty = True
-            continue
-        if active_tab == TAB_MONITOR and key in (curses.KEY_UP, ord("k")) and rows:
-            selected = max(0, selected - 1)
-            dirty = True
-            continue
-        if active_tab == TAB_MONITOR and key in (curses.KEY_DOWN, ord("j")) and rows:
-            selected = min(len(rows) - 1, selected + 1)
-            dirty = True
-            continue
-        if active_tab == TAB_MONITOR and key in (10, 13, curses.KEY_ENTER) and rows:
-            popup = True
-            popup_selected = ACTION_CLOSE
-            popup_ignore_enter_until = time.monotonic() + 0.75
-            curses.flushinp()
-            dirty = True
-            continue
-        if active_tab == TAB_ORDERS and key in (curses.KEY_UP, ord("k")) and order_rows:
-            order_selected = max(0, order_selected - 1)
-            dirty = True
-            continue
-        if active_tab == TAB_ORDERS and key in (curses.KEY_DOWN, ord("j")) and order_rows:
-            order_selected = min(len(order_rows) - 1, order_selected + 1)
-            dirty = True
-            continue
-        if active_tab == TAB_ORDERS and key in (10, 13, curses.KEY_ENTER, ord("a"), ord("A")) and order_rows:
-            order_status = _adjust_selected_order(
-                stdscr,
-                order_rows[order_selected],
-                config=config,
-                broker=broker,
-                repository=repository,
-            )
-            force_order_refresh = True
-            dirty = True
-            continue
-        if active_tab == TAB_CHARTS and key in (curses.KEY_UP, ord("k")):
-            chart_scroll = max(0, chart_scroll - 1)
-            dirty = True
-            continue
-        if active_tab == TAB_CHARTS and key in (curses.KEY_DOWN, ord("j")):
-            height, _ = stdscr.getmaxyx()
-            chart_scroll = min(max(0, len(chart_lines) - max(1, height - 5)), chart_scroll + 1)
-            dirty = True
-            continue
-        if active_tab == TAB_CHARTS and key == curses.KEY_PPAGE:
-            height, _ = stdscr.getmaxyx()
-            chart_scroll = max(0, chart_scroll - max(1, height - 5))
-            dirty = True
-            continue
-        if active_tab == TAB_CHARTS and key == curses.KEY_NPAGE:
-            height, _ = stdscr.getmaxyx()
-            visible_rows = max(1, height - 5)
-            chart_scroll = min(max(0, len(chart_lines) - visible_rows), chart_scroll + visible_rows)
-            dirty = True
-            continue
+                continue
+            if key == ord("r"):
+                if active_tab == TAB_MONITOR and refresh.waiting_kind != REFRESH_MONITOR:
+                    force_refresh = True
+                elif active_tab == TAB_ORDERS and refresh.waiting_kind != REFRESH_ORDERS:
+                    force_order_refresh = True
+                elif active_tab == TAB_CHARTS and refresh.waiting_kind != REFRESH_CHARTS:
+                    force_chart_refresh = True
+                dirty = True
+                continue
+            if active_tab == TAB_MONITOR and key in (ord("n"), ord("N")):
+                if refresh.waiting:
+                    status = _broker_busy_message(refresh.waiting_kind)
+                else:
+                    status = _open_new_strangle(stdscr, config=config, broker=broker, repository=repository)
+                dirty = True
+                continue
+            if active_tab == TAB_MONITOR and key in (curses.KEY_UP, ord("k")) and rows:
+                selected = max(0, selected - 1)
+                dirty = True
+                continue
+            if active_tab == TAB_MONITOR and key in (curses.KEY_DOWN, ord("j")) and rows:
+                selected = min(len(rows) - 1, selected + 1)
+                dirty = True
+                continue
+            if active_tab == TAB_MONITOR and key in (10, 13, curses.KEY_ENTER) and rows:
+                popup = True
+                popup_selected = ACTION_CLOSE
+                popup_ignore_enter_until = time.monotonic() + 0.75
+                curses.flushinp()
+                dirty = True
+                continue
+            if active_tab == TAB_ORDERS and key in (curses.KEY_UP, ord("k")) and order_rows:
+                order_selected = max(0, order_selected - 1)
+                dirty = True
+                continue
+            if active_tab == TAB_ORDERS and key in (curses.KEY_DOWN, ord("j")) and order_rows:
+                order_selected = min(len(order_rows) - 1, order_selected + 1)
+                dirty = True
+                continue
+            if active_tab == TAB_ORDERS and key in (10, 13, curses.KEY_ENTER, ord("a"), ord("A")) and order_rows:
+                if refresh.waiting:
+                    order_status = _broker_busy_message(refresh.waiting_kind)
+                else:
+                    order_status = _adjust_selected_order(
+                        stdscr,
+                        order_rows[order_selected],
+                        config=config,
+                        broker=broker,
+                        repository=repository,
+                    )
+                    force_order_refresh = True
+                dirty = True
+                continue
+            if active_tab == TAB_CHARTS and key in (curses.KEY_UP, ord("k")):
+                chart_scroll = max(0, chart_scroll - 1)
+                dirty = True
+                continue
+            if active_tab == TAB_CHARTS and key in (curses.KEY_DOWN, ord("j")):
+                height, _ = stdscr.getmaxyx()
+                chart_scroll = min(max(0, len(chart_lines) - max(1, height - 5)), chart_scroll + 1)
+                dirty = True
+                continue
+            if active_tab == TAB_CHARTS and key == curses.KEY_PPAGE:
+                height, _ = stdscr.getmaxyx()
+                chart_scroll = max(0, chart_scroll - max(1, height - 5))
+                dirty = True
+                continue
+            if active_tab == TAB_CHARTS and key == curses.KEY_NPAGE:
+                height, _ = stdscr.getmaxyx()
+                visible_rows = max(1, height - 5)
+                chart_scroll = min(max(0, len(chart_lines) - visible_rows), chart_scroll + visible_rows)
+                dirty = True
+                continue
+    finally:
+        refresh.close()
 
 
 def _build_monitor_rows_with_open_closing_orders(
@@ -322,6 +382,46 @@ def _build_monitor_rows_with_open_closing_orders(
 def _refresh_todays_order_rows(*, broker: Broker, repository: Repository) -> tuple[list[OrderStatusRow], str | None]:
     order_drafts = repository.list_order_drafts(limit=ORDER_DRAFT_LIMIT, only_today=True)
     return refresh_order_status_rows(order_drafts, broker, repository)
+
+
+def _build_chart_refresh(
+    *,
+    broker: Broker,
+    config: AppConfig,
+    rows: list[OptionMonitorRow],
+    width: int,
+    height: int,
+) -> tuple[list[str], int]:
+    chart_rows = rows or build_monitor_rows(broker, config)
+    charts = build_intraday_charts(
+        broker,
+        config,
+        chart_rows,
+        interval_minutes=_chart_interval_for_width(width),
+    )
+    lines = render_intraday_charts(
+        charts,
+        width=width,
+        chart_height=_chart_height_for_terminal(height),
+    )
+    return lines, len(charts)
+
+
+def _order_refresh_status(
+    rows: list[OrderStatusRow],
+    live_status_note: str | None,
+    *,
+    refreshed_at: datetime,
+) -> str:
+    status = f"{len(rows)} local order records today | refreshed {refreshed_at.strftime('%H:%M:%S')}"
+    if live_status_note:
+        status = f"{status} | {live_status_note}"
+    return status
+
+
+def _broker_busy_message(waiting_kind: str | None) -> str:
+    target = waiting_kind or "refresh"
+    return f"Broker is busy refreshing {target}; try again when the broker spinner clears."
 
 
 def _draw(
@@ -490,6 +590,26 @@ def _draw_tab_bar(stdscr: curses.window, *, active_tab: int) -> None:
         x += len(text)
         if x >= width:
             break
+
+
+def _draw_broker_spinner(stdscr: curses.window, *, waiting: bool, frame: int) -> None:
+    if not waiting:
+        return
+    height, width = stdscr.getmaxyx()
+    if height <= 0 or width <= 0:
+        return
+    spinner = BROKER_SPINNER_FRAMES[frame % len(BROKER_SPINNER_FRAMES)]
+    try:
+        stdscr.addnstr(
+            height - 1,
+            max(0, width - 2),
+            spinner,
+            1,
+            curses.A_BOLD | curses.A_REVERSE,
+        )
+    except curses.error:
+        pass
+    stdscr.refresh()
 
 
 def _is_function_key(key: int, number: int) -> bool:

@@ -24,6 +24,7 @@ from option_sentinel.monitor_tui import (
     _roll_selected_option_with_confirmation,
     _roll_visible_row_count,
     _stock_symbol_visible_row_count,
+    _draw_broker_spinner,
     _wrap_message_lines,
 )
 from option_sentinel.order_status import OrderStatusRow
@@ -99,6 +100,29 @@ def test_build_monitor_rows_includes_short_and_long_options() -> None:
     assert rows[1].delta == 0.35
     assert rows[1].theta == -0.02
     assert rows[1].pop == 0.35
+
+
+def test_broker_spinner_draws_only_in_bottom_right_while_waiting() -> None:
+    calls: list[tuple] = []
+
+    class Window:
+        def getmaxyx(self) -> tuple[int, int]:
+            return 30, 160
+
+        def addnstr(self, *args) -> None:
+            calls.append(args)
+
+        def refresh(self) -> None:
+            calls.append(("refresh",))
+
+    window = Window()
+    _draw_broker_spinner(window, waiting=False, frame=0)
+    assert calls == []
+
+    _draw_broker_spinner(window, waiting=True, frame=1)
+
+    assert calls[0][:4] == (29, 158, "/", 1)
+    assert calls[1] == ("refresh",)
 
 
 def test_parse_broker_option_positions_sorts_lowest_dte_first() -> None:

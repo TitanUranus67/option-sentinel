@@ -118,6 +118,20 @@ def test_refresh_order_status_rows_uses_stored_broker_order_id(tmp_path) -> None
     assert saved.broker_status == "FILLED"
 
 
+def test_refresh_order_status_rows_does_not_poll_terminal_broker_status(tmp_path) -> None:
+    repository = Repository(tmp_path / "orders.db")
+    repository.add_order_draft(_draft(broker_order_id="123456789", broker_status="FILLED"))
+
+    class Broker:
+        def get_orders(self, **kwargs: Any) -> list[dict[str, Any]]:
+            raise AssertionError("terminal orders must not trigger a broker refresh")
+
+    rows, note = refresh_order_status_rows(repository.list_order_drafts(), Broker(), repository)
+
+    assert note is None
+    assert rows[0].display_status == "FILLED"
+
+
 def test_refresh_order_status_rows_reconciles_unknown_outcome_by_shape(tmp_path) -> None:
     repository = Repository(tmp_path / "orders.db")
     repository.add_order_draft(_draft(status="UNKNOWN"))

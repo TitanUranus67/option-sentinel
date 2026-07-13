@@ -35,6 +35,15 @@ _OPEN_BROKER_STATUSES = {
     "WORKING",
 }
 
+_TERMINAL_BROKER_STATUSES = {
+    "CANCELED",
+    "CANCELLED",
+    "EXPIRED",
+    "FILLED",
+    "REJECTED",
+    "REPLACED",
+}
+
 
 def refresh_order_status_rows(
     drafts: list[OrderDraft],
@@ -153,6 +162,8 @@ def open_closing_order_symbols(rows: list[OrderStatusRow]) -> set[str]:
 
 
 def _needs_live_status(draft: OrderDraft) -> bool:
+    if _normalize_status(draft.broker_status) in _TERMINAL_BROKER_STATUSES:
+        return False
     return draft.status.upper() in {"SUBMITTED", "UNKNOWN"}
 
 
