@@ -25,6 +25,9 @@ class Broker(Protocol):
     def get_option_chain(self, symbol: str, from_date: date, to_date: date) -> OptionChain:
         ...
 
+    def get_implied_volatility(self, symbol: str, from_date: date, to_date: date) -> float | None:
+        ...
+
     def preview_order(self, order: dict[str, Any]) -> dict[str, Any]:
         ...
 

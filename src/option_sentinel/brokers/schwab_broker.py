@@ -11,6 +11,7 @@ from ..models import OptionChain, OptionContract
 
 TRAILING_PRICE_HISTORY_CACHE_SECONDS = 1800
 INTRADAY_PRICE_HISTORY_CACHE_SECONDS = 300
+IMPLIED_VOLATILITY_CACHE_SECONDS = 300
 
 
 class SchwabBroker(Broker):
@@ -26,6 +27,7 @@ class SchwabBroker(Broker):
         self.account_hash = self._configured_account_hash or self._only_account_hash()
         self._price_history_cache: dict[tuple[str, int], tuple[datetime, list[dict[str, Any]]]] = {}
         self._intraday_price_history_cache: dict[tuple[str, int, date], tuple[datetime, list[dict[str, Any]]]] = {}
+        self._implied_volatility_cache: dict[tuple[str, date, date], tuple[datetime, float | None]] = {}
 
     @classmethod
     def from_config(cls, config: AppConfig, *, config_base: str | Path | None = None) -> "SchwabBroker":
@@ -164,6 +166,30 @@ class SchwabBroker(Broker):
         )
         data = _json_response(response)
         return _parse_option_chain(symbol.upper(), data)
+
+    def get_implied_volatility(self, symbol: str, from_date: date, to_date: date) -> float | None:
+        normalized_symbol = symbol.upper()
+        cache_key = (normalized_symbol, from_date, to_date)
+        now = datetime.now(timezone.utc)
+        cached = self._implied_volatility_cache.get(cache_key)
+        if cached is not None and (now - cached[0]).total_seconds() < IMPLIED_VOLATILITY_CACHE_SECONDS:
+            return cached[1]
+
+        response = self.client.get_option_chain(
+            normalized_symbol,
+            strike_count=2,
+            include_underlying_quote=True,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        data = _json_response(response)
+        implied_volatility = (
+            _atm_implied_volatility(data, from_date=from_date, to_date=to_date)
+            if isinstance(data, dict)
+            else None
+        )
+        self._implied_volatility_cache[cache_key] = (now, implied_volatility)
+        return implied_volatility
 
     def preview_order(self, order: dict[str, Any]) -> dict[str, Any]:
         _reject_market_order(order)
@@ -324,6 +350,60 @@ def _parse_option_chain(symbol: str, data: dict[str, Any]) -> OptionChain:
         contracts=contracts,
         raw=data,
     )
+
+
+def _atm_implied_volatility(
+    data: dict[str, Any],
+    *,
+    from_date: date,
+    to_date: date,
+) -> float | None:
+    underlying = data.get("underlying") if isinstance(data.get("underlying"), dict) else {}
+    underlying_price = _first_float(
+        data.get("underlyingPrice"),
+        underlying.get("last"),
+        underlying.get("lastPrice"),
+        underlying.get("mark"),
+    )
+    if underlying_price is None:
+        return None
+
+    volatility_by_contract: dict[tuple[date, float], list[float]] = {}
+    for side_key in ("putExpDateMap", "callExpDateMap"):
+        expiration_map = data.get(side_key)
+        if not isinstance(expiration_map, dict):
+            continue
+        for expiration_key, strikes in expiration_map.items():
+            try:
+                expiration = date.fromisoformat(str(expiration_key).split(":", maxsplit=1)[0])
+            except ValueError:
+                continue
+            if not isinstance(strikes, dict):
+                continue
+            for strike_text, option_rows in strikes.items():
+                rows = option_rows if isinstance(option_rows, list) else [option_rows]
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    strike = _first_float(row.get("strikePrice"), strike_text)
+                    volatility = _first_float(row.get("volatility"), row.get("impliedVolatility"))
+                    if strike is None or volatility is None or volatility <= 0:
+                        continue
+                    volatility_by_contract.setdefault((expiration, strike), []).append(volatility)
+
+    if not volatility_by_contract:
+        return None
+
+    target_date = from_date + timedelta(days=max(0, (to_date - from_date).days // 2))
+    expiration, strike = min(
+        volatility_by_contract,
+        key=lambda contract: (
+            abs((contract[0] - target_date).days),
+            abs(contract[1] - underlying_price),
+        ),
+    )
+    values = volatility_by_contract[(expiration, strike)]
+    return round(sum(values) / len(values), 3)
 
 
 def _parse_option_side(symbol: str, exp_map: dict[str, Any], option_type: str) -> list[OptionContract]:

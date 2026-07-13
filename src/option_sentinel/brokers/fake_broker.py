@@ -22,6 +22,12 @@ class FakeBroker(Broker):
             "INTC": 35.00,
             "RKLB": 10.00,
         }
+        self._implied_volatilities = {
+            "TSLA": 52.4,
+            "NVDA": 38.7,
+            "INTC": 31.2,
+            "RKLB": 64.8,
+        }
 
     def get_account(self) -> dict[str, Any]:
         return {
@@ -215,6 +221,9 @@ class FakeBroker(Broker):
             contracts=contracts,
             raw={"source": "fake"},
         )
+
+    def get_implied_volatility(self, symbol: str, from_date: date, to_date: date) -> float | None:
+        return self._implied_volatilities.get(symbol.upper(), 30.0)
 
     def preview_order(self, order: dict[str, Any]) -> dict[str, Any]:
         return {

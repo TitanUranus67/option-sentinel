@@ -303,7 +303,13 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 if refresh.waiting:
                     status = _broker_busy_message(refresh.waiting_kind)
                 else:
-                    status = _open_new_strangle(stdscr, config=config, broker=broker, repository=repository)
+                    status = _open_new_strangle(
+                        stdscr,
+                        config=config,
+                        broker=broker,
+                        repository=repository,
+                        refresh=refresh,
+                    )
                 dirty = True
                 continue
             if active_tab == TAB_MONITOR and key in (curses.KEY_UP, ord("k")) and rows:
@@ -1185,8 +1191,15 @@ def _open_new_strangle(
     config: AppConfig,
     broker: Broker,
     repository: Repository,
+    refresh: BrokerRefreshCoordinator,
 ) -> str:
-    symbol = _select_stock_symbol(stdscr, config.symbols)
+    symbol = _select_stock_symbol(
+        stdscr,
+        config.symbols,
+        config=config,
+        broker=broker,
+        refresh=refresh,
+    )
     if symbol is None:
         return "Open cancelled."
 
@@ -1309,7 +1322,14 @@ def _configured_stock_symbols(symbols: list[str]) -> list[str]:
     return selected
 
 
-def _select_stock_symbol(stdscr: curses.window, symbols: list[str]) -> str | None:
+def _select_stock_symbol(
+    stdscr: curses.window,
+    symbols: list[str],
+    *,
+    config: AppConfig,
+    broker: Broker,
+    refresh: BrokerRefreshCoordinator,
+) -> str | None:
     choices = _configured_stock_symbols(symbols)
     if not choices:
         _draw_message_box(stdscr, ["No symbols configured.", "Press any key."])
@@ -1318,12 +1338,52 @@ def _select_stock_symbol(stdscr: curses.window, symbols: list[str]) -> str | Non
 
     selected = 0
     scroll = 0
-    stdscr.timeout(-1)
+    implied_volatilities: dict[str, float | None] = {}
+    requested_symbol: str | None = None
+    cancel_requested = False
+    stdscr.timeout(250)
     try:
         while True:
+            completed = refresh.poll()
+            if completed is not None and completed.kind.startswith("iv:"):
+                completed_symbol = completed.kind.removeprefix("iv:")
+                implied_volatilities[completed_symbol] = None if completed.error is not None else completed.value
+
+            if cancel_requested and not refresh.waiting:
+                return None
+            if requested_symbol is not None and requested_symbol in implied_volatilities and not refresh.waiting:
+                return requested_symbol
+
+            if not refresh.waiting and not cancel_requested:
+                lookup_symbol = None
+                if requested_symbol is not None and requested_symbol not in implied_volatilities:
+                    lookup_symbol = requested_symbol
+                elif choices[selected] not in implied_volatilities:
+                    lookup_symbol = choices[selected]
+                else:
+                    lookup_symbol = next(
+                        (symbol for symbol in choices if symbol not in implied_volatilities),
+                        None,
+                    )
+                if lookup_symbol is not None:
+                    refresh.submit(
+                        f"iv:{lookup_symbol}",
+                        lambda symbol=lookup_symbol: _symbol_implied_volatility(
+                            broker,
+                            config,
+                            symbol,
+                        ),
+                    )
+
             visible_rows = _stock_symbol_visible_row_count(*stdscr.getmaxyx(), symbol_count=len(choices))
             if visible_rows <= 0:
-                _draw_stock_symbol_popup(stdscr, choices, selected_index=selected, scroll=scroll)
+                _draw_stock_symbol_popup(
+                    stdscr,
+                    choices,
+                    implied_volatilities=implied_volatilities,
+                    selected_index=selected,
+                    scroll=scroll,
+                )
                 stdscr.getch()
                 return None
             if selected < scroll:
@@ -1331,18 +1391,46 @@ def _select_stock_symbol(stdscr: curses.window, symbols: list[str]) -> str | Non
             if selected >= scroll + visible_rows:
                 scroll = selected - visible_rows + 1
 
-            _draw_stock_symbol_popup(stdscr, choices, selected_index=selected, scroll=scroll)
+            _draw_stock_symbol_popup(
+                stdscr,
+                choices,
+                implied_volatilities=implied_volatilities,
+                selected_index=selected,
+                scroll=scroll,
+            )
+            _draw_broker_spinner(
+                stdscr,
+                waiting=refresh.waiting,
+                frame=int(time.monotonic() * len(BROKER_SPINNER_FRAMES)),
+            )
             key = stdscr.getch()
+            if key == -1:
+                continue
             if key in (27, ord("q"), curses.KEY_LEFT):
-                return None
+                if refresh.waiting:
+                    cancel_requested = True
+                else:
+                    return None
             if key in (curses.KEY_UP, ord("k")):
                 selected = max(0, selected - 1)
             elif key in (curses.KEY_DOWN, ord("j")):
                 selected = min(len(choices) - 1, selected + 1)
             elif key in (10, 13, curses.KEY_ENTER):
-                return choices[selected]
+                requested_symbol = choices[selected]
     finally:
         stdscr.timeout(250)
+
+
+def _symbol_implied_volatility(broker: Broker, config: AppConfig, symbol: str) -> float | None:
+    get_implied_volatility = getattr(broker, "get_implied_volatility", None)
+    if not callable(get_implied_volatility):
+        return None
+    today = date.today()
+    return get_implied_volatility(
+        symbol,
+        today + timedelta(days=config.strategy.dte_min),
+        today + timedelta(days=config.strategy.dte_max),
+    )
 
 
 def _stock_symbol_visible_row_count(height: int, width: int, *, symbol_count: int) -> int:
@@ -1356,6 +1444,7 @@ def _draw_stock_symbol_popup(
     stdscr: curses.window,
     symbols: list[str],
     *,
+    implied_volatilities: dict[str, float | None] | None = None,
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
@@ -1368,7 +1457,7 @@ def _draw_stock_symbol_popup(
         return
 
     longest_symbol = max((len(symbol) for symbol in symbols), default=0)
-    box_width = min(max(38, longest_symbol + 8), max(34, width - 4))
+    box_width = min(max(38, longest_symbol + 18), max(34, width - 4))
     box_height = min(max(8, len(symbols) + 5), height - 2)
     top = max(0, (height - box_height) // 2)
     left = max(0, (width - box_width) // 2)
@@ -1378,7 +1467,7 @@ def _draw_stock_symbol_popup(
         _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
     _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
     _add_line(stdscr, top + 1, left + 2, "Open new short strangle", box_width - 4, curses.A_BOLD)
-    _add_line(stdscr, top + 2, left + 2, "Select stock", box_width - 4)
+    _add_line(stdscr, top + 2, left + 2, "Select stock       IV", box_width - 4)
 
     visible_symbols: list[str] = []
     if not symbols:
@@ -1387,11 +1476,13 @@ def _draw_stock_symbol_popup(
         max_rows = max(0, box_height - 5)
         visible_symbols = symbols[scroll : scroll + max_rows]
         for offset, symbol in enumerate(visible_symbols):
+            iv_loaded = implied_volatilities is not None and symbol in implied_volatilities
+            iv = implied_volatilities.get(symbol) if iv_loaded and implied_volatilities is not None else None
             _add_menu_item(
                 stdscr,
                 top + 3 + offset,
                 left + 2,
-                symbol,
+                _format_symbol_iv(symbol, iv, loaded=iv_loaded),
                 box_width - 4,
                 selected=selected_index == scroll + offset,
             )
@@ -1403,6 +1494,16 @@ def _draw_stock_symbol_popup(
         footer = f"{first}-{last} of {len(symbols)}. Enter selects."
     _add_line(stdscr, top + box_height - 2, left + 2, footer, box_width - 4)
     stdscr.refresh()
+
+
+def _format_symbol_iv(symbol: str, implied_volatility: float | None, *, loaded: bool) -> str:
+    if not loaded:
+        iv = "..."
+    elif implied_volatility is None:
+        iv = "-"
+    else:
+        iv = f"{implied_volatility:.1f}%"
+    return f"{symbol:<12} {iv:>7}"
 
 
 def _select_open_candidate(

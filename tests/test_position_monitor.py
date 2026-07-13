@@ -15,6 +15,7 @@ from option_sentinel.monitor_tui import (
     _configured_stock_symbols,
     _format_order_row,
     _format_row,
+    _format_symbol_iv,
     _monitor_status,
     _monitor_row_attr,
     _open_candidate_strangle_with_confirmation,
@@ -23,6 +24,7 @@ from option_sentinel.monitor_tui import (
     _price_prompt_field,
     _roll_selected_option_with_confirmation,
     _roll_visible_row_count,
+    _select_stock_symbol,
     _stock_symbol_visible_row_count,
     _draw_broker_spinner,
     _wrap_message_lines,
@@ -51,6 +53,7 @@ from option_sentinel.position_monitor import (
     trailing_price_ranges_from_broker,
     week52_range_from_quote,
 )
+from option_sentinel.refresh import BrokerRefreshCoordinator
 from option_sentinel.roll import RollCandidate
 
 
@@ -417,6 +420,57 @@ def test_schwab_price_history_fetches_daily_candles_and_caches() -> None:
     assert client.calls[0]["symbol"] == "NVDA"
     assert client.calls[0]["need_extended_hours_data"] is False
     assert client.calls[0]["end_datetime"] - client.calls[0]["start_datetime"] == timedelta(days=30)
+
+
+def test_schwab_implied_volatility_uses_minimal_chain_and_caches() -> None:
+    expiration = date.today() + timedelta(days=25)
+
+    class Response:
+        def json(self) -> dict:
+            return {
+                "volatility": 29.0,
+                "underlyingPrice": 206.22,
+                "putExpDateMap": {
+                    f"{expiration.isoformat()}:25": {
+                        "205.0": [{"strikePrice": 205.0, "volatility": 38.301}],
+                        "210.0": [{"strikePrice": 210.0, "volatility": 40.206}],
+                    }
+                },
+                "callExpDateMap": {
+                    f"{expiration.isoformat()}:25": {
+                        "205.0": [{"strikePrice": 205.0, "volatility": 38.321}],
+                        "210.0": [{"strikePrice": 210.0, "volatility": 40.226}],
+                    }
+                },
+            }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def get_option_chain(self, symbol: str, **kwargs) -> Response:
+            self.calls.append({"symbol": symbol, **kwargs})
+            return Response()
+
+    client = Client()
+    broker = SchwabBroker(client, account_hash="HASH")  # type: ignore[arg-type]
+    from_date = date.today() + timedelta(days=21)
+    to_date = date.today() + timedelta(days=30)
+
+    first = broker.get_implied_volatility("nvda", from_date, to_date)
+    second = broker.get_implied_volatility("NVDA", from_date, to_date)
+
+    assert first == 38.311
+    assert second == first
+    assert client.calls == [
+        {
+            "symbol": "NVDA",
+            "strike_count": 2,
+            "include_underlying_quote": True,
+            "from_date": from_date,
+            "to_date": to_date,
+        }
+    ]
 
 
 def test_schwab_intraday_price_history_fetches_minute_candles_and_caches() -> None:
@@ -810,6 +864,47 @@ def test_roll_candidate_list_uses_available_room_for_twelve_rows() -> None:
 def test_open_stock_selector_uses_configured_symbols_without_duplicates() -> None:
     assert _configured_stock_symbols([" nvda ", "TSLA", "NVDA", "rklb"]) == ["NVDA", "TSLA", "RKLB"]
     assert _stock_symbol_visible_row_count(12, 80, symbol_count=4) == 4
+
+
+def test_symbol_iv_format_shows_loading_missing_and_percentage() -> None:
+    assert _format_symbol_iv("NVDA", None, loaded=False).strip() == "NVDA             ..."
+    assert _format_symbol_iv("NVDA", None, loaded=True).strip() == "NVDA               -"
+    assert _format_symbol_iv("NVDA", 29.44, loaded=True).strip() == "NVDA           29.4%"
+
+
+def test_stock_selector_loads_iv_in_background_before_selecting(monkeypatch) -> None:
+    drawn_volatilities: list[dict[str, float | None]] = []
+
+    class Window:
+        def timeout(self, milliseconds: int) -> None:
+            pass
+
+        def getmaxyx(self) -> tuple[int, int]:
+            return 20, 80
+
+        def getch(self) -> int:
+            if drawn_volatilities and "NVDA" in drawn_volatilities[-1]:
+                return curses.KEY_ENTER
+            return -1
+
+    def capture_popup(*args, implied_volatilities, **kwargs) -> None:
+        drawn_volatilities.append(dict(implied_volatilities))
+
+    monkeypatch.setattr("option_sentinel.monitor_tui._draw_stock_symbol_popup", capture_popup)
+    monkeypatch.setattr("option_sentinel.monitor_tui._draw_broker_spinner", lambda *args, **kwargs: None)
+    refresh = BrokerRefreshCoordinator()
+
+    selected = _select_stock_symbol(
+        Window(),  # type: ignore[arg-type]
+        ["NVDA"],
+        config=AppConfig(),
+        broker=FakeBroker(),
+        refresh=refresh,
+    )
+    refresh.close()
+
+    assert selected == "NVDA"
+    assert drawn_volatilities[-1] == {"NVDA": 38.7}
 
 
 def test_chart_interval_uses_minute_data_when_terminal_is_wide() -> None:
