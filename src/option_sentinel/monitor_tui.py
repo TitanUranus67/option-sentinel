@@ -1339,6 +1339,7 @@ def _select_stock_symbol(
     selected = 0
     scroll = 0
     implied_volatilities: dict[str, float | None] = {}
+    implied_volatility_errors: dict[str, str] = {}
     requested_symbol: str | None = None
     cancel_requested = False
     stdscr.timeout(250)
@@ -1347,7 +1348,16 @@ def _select_stock_symbol(
             completed = refresh.poll()
             if completed is not None and completed.kind.startswith("iv:"):
                 completed_symbol = completed.kind.removeprefix("iv:")
-                implied_volatilities[completed_symbol] = None if completed.error is not None else completed.value
+                if completed.error is None:
+                    implied_volatilities[completed_symbol] = completed.value
+                else:
+                    error_message = _symbol_iv_error_message(completed.error)
+                    failed_symbols = (
+                        choices if _is_broker_auth_error(completed.error) else (completed_symbol,)
+                    )
+                    for failed_symbol in failed_symbols:
+                        implied_volatilities[failed_symbol] = None
+                        implied_volatility_errors[failed_symbol] = error_message
 
             if cancel_requested and not refresh.waiting:
                 return None
@@ -1381,6 +1391,7 @@ def _select_stock_symbol(
                     stdscr,
                     choices,
                     implied_volatilities=implied_volatilities,
+                    implied_volatility_errors=implied_volatility_errors,
                     selected_index=selected,
                     scroll=scroll,
                 )
@@ -1395,6 +1406,7 @@ def _select_stock_symbol(
                 stdscr,
                 choices,
                 implied_volatilities=implied_volatilities,
+                implied_volatility_errors=implied_volatility_errors,
                 selected_index=selected,
                 scroll=scroll,
             )
@@ -1433,6 +1445,17 @@ def _symbol_implied_volatility(broker: Broker, config: AppConfig, symbol: str) -
     )
 
 
+def _is_broker_auth_error(error: Exception) -> bool:
+    message = f"{type(error).__name__}: {error}".lower()
+    return "invalid_grant" in message or "refresh token is invalid, expired or revoked" in message
+
+
+def _symbol_iv_error_message(error: Exception) -> str:
+    if _is_broker_auth_error(error):
+        return "Schwab login expired. Run option-sentinel auth --overwrite-token."
+    return f"IV lookup failed: {type(error).__name__}"
+
+
 def _stock_symbol_visible_row_count(height: int, width: int, *, symbol_count: int) -> int:
     if height < 8 or width < 34:
         return 0
@@ -1445,6 +1468,7 @@ def _draw_stock_symbol_popup(
     symbols: list[str],
     *,
     implied_volatilities: dict[str, float | None] | None = None,
+    implied_volatility_errors: dict[str, str] | None = None,
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
@@ -1457,7 +1481,8 @@ def _draw_stock_symbol_popup(
         return
 
     longest_symbol = max((len(symbol) for symbol in symbols), default=0)
-    box_width = min(max(38, longest_symbol + 18), max(34, width - 4))
+    longest_error = max((len(message) for message in (implied_volatility_errors or {}).values()), default=0)
+    box_width = min(max(38, longest_symbol + 18, longest_error + 4), max(34, width - 4))
     box_height = min(max(8, len(symbols) + 5), height - 2)
     top = max(0, (height - box_height) // 2)
     left = max(0, (width - box_width) // 2)
@@ -1478,17 +1503,24 @@ def _draw_stock_symbol_popup(
         for offset, symbol in enumerate(visible_symbols):
             iv_loaded = implied_volatilities is not None and symbol in implied_volatilities
             iv = implied_volatilities.get(symbol) if iv_loaded and implied_volatilities is not None else None
+            iv_failed = implied_volatility_errors is not None and symbol in implied_volatility_errors
             _add_menu_item(
                 stdscr,
                 top + 3 + offset,
                 left + 2,
-                _format_symbol_iv(symbol, iv, loaded=iv_loaded),
+                _format_symbol_iv(symbol, iv, loaded=iv_loaded, failed=iv_failed),
                 box_width - 4,
                 selected=selected_index == scroll + offset,
             )
 
-    footer = "Enter selects. Esc cancels."
-    if symbols and len(symbols) > len(visible_symbols):
+    selected_symbol = symbols[selected_index] if selected_index is not None and symbols else None
+    selected_error = (
+        implied_volatility_errors.get(selected_symbol)
+        if implied_volatility_errors and selected_symbol
+        else None
+    )
+    footer = selected_error or "Enter selects. Esc cancels."
+    if not selected_error and symbols and len(symbols) > len(visible_symbols):
         first = scroll + 1
         last = scroll + len(visible_symbols)
         footer = f"{first}-{last} of {len(symbols)}. Enter selects."
@@ -1496,9 +1528,17 @@ def _draw_stock_symbol_popup(
     stdscr.refresh()
 
 
-def _format_symbol_iv(symbol: str, implied_volatility: float | None, *, loaded: bool) -> str:
+def _format_symbol_iv(
+    symbol: str,
+    implied_volatility: float | None,
+    *,
+    loaded: bool,
+    failed: bool = False,
+) -> str:
     if not loaded:
         iv = "..."
+    elif failed:
+        iv = "ERR"
     elif implied_volatility is None:
         iv = "-"
     else:

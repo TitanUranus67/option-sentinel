@@ -869,6 +869,7 @@ def test_open_stock_selector_uses_configured_symbols_without_duplicates() -> Non
 def test_symbol_iv_format_shows_loading_missing_and_percentage() -> None:
     assert _format_symbol_iv("NVDA", None, loaded=False).strip() == "NVDA             ..."
     assert _format_symbol_iv("NVDA", None, loaded=True).strip() == "NVDA               -"
+    assert _format_symbol_iv("NVDA", None, loaded=True, failed=True).strip() == "NVDA             ERR"
     assert _format_symbol_iv("NVDA", 29.44, loaded=True).strip() == "NVDA           29.4%"
 
 
@@ -905,6 +906,52 @@ def test_stock_selector_loads_iv_in_background_before_selecting(monkeypatch) -> 
 
     assert selected == "NVDA"
     assert drawn_volatilities[-1] == {"NVDA": 38.7}
+
+
+def test_stock_selector_surfaces_expired_login_and_stops_iv_lookups(monkeypatch) -> None:
+    drawn_errors: list[dict[str, str]] = []
+
+    class Window:
+        def timeout(self, milliseconds: int) -> None:
+            pass
+
+        def getmaxyx(self) -> tuple[int, int]:
+            return 20, 100
+
+        def getch(self) -> int:
+            if drawn_errors and drawn_errors[-1]:
+                return 27
+            return -1
+
+    class ExpiredBroker:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get_implied_volatility(self, symbol: str, from_date: date, to_date: date) -> float | None:
+            self.calls.append(symbol)
+            raise RuntimeError("invalid_grant: Refresh token is invalid, expired or revoked")
+
+    def capture_popup(*args, implied_volatility_errors, **kwargs) -> None:
+        drawn_errors.append(dict(implied_volatility_errors))
+
+    monkeypatch.setattr("option_sentinel.monitor_tui._draw_stock_symbol_popup", capture_popup)
+    monkeypatch.setattr("option_sentinel.monitor_tui._draw_broker_spinner", lambda *args, **kwargs: None)
+    broker = ExpiredBroker()
+    refresh = BrokerRefreshCoordinator()
+
+    selected = _select_stock_symbol(
+        Window(),  # type: ignore[arg-type]
+        ["NVDA", "TSLA"],
+        config=AppConfig(),
+        broker=broker,  # type: ignore[arg-type]
+        refresh=refresh,
+    )
+    refresh.close()
+
+    expected_error = "Schwab login expired. Run option-sentinel auth --overwrite-token."
+    assert selected is None
+    assert broker.calls == ["NVDA"]
+    assert drawn_errors[-1] == {"NVDA": expected_error, "TSLA": expected_error}
 
 
 def test_chart_interval_uses_minute_data_when_terminal_is_wide() -> None:
