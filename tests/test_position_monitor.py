@@ -18,6 +18,7 @@ from option_sentinel.monitor_tui import (
     _format_symbol_iv,
     _monitor_status,
     _monitor_row_attr,
+    _open_position_counts_by_symbol,
     _open_candidate_strangle_with_confirmation,
     _order_legs_summary,
     _order_mid_price,
@@ -867,10 +868,52 @@ def test_open_stock_selector_uses_configured_symbols_without_duplicates() -> Non
 
 
 def test_symbol_iv_format_shows_loading_missing_and_percentage() -> None:
-    assert _format_symbol_iv("NVDA", None, loaded=False).strip() == "NVDA             ..."
-    assert _format_symbol_iv("NVDA", None, loaded=True).strip() == "NVDA               -"
-    assert _format_symbol_iv("NVDA", None, loaded=True, failed=True).strip() == "NVDA             ERR"
-    assert _format_symbol_iv("NVDA", 29.44, loaded=True).strip() == "NVDA           29.4%"
+    assert _format_symbol_iv("NVDA", None, loaded=False).strip() == "NVDA             ...      0"
+    assert _format_symbol_iv("NVDA", None, loaded=True).strip() == "NVDA               -      0"
+    assert _format_symbol_iv("NVDA", None, loaded=True, failed=True).strip() == "NVDA             ERR      0"
+    assert _format_symbol_iv("NVDA", 29.44, loaded=True, open_positions=4).strip() == "NVDA           29.4%      4"
+
+
+def test_open_position_counts_sum_contract_quantity_by_underlying() -> None:
+    expiration = date.today() + timedelta(days=30)
+    rows = build_monitor_rows_from_quotes(
+        [
+            BrokerOptionPosition(
+                symbol="NVDA PUT",
+                underlying_symbol="nvda",
+                expiration=expiration,
+                option_type="PUT",
+                strike=100,
+                side="SHORT",
+                quantity=2,
+                average_price=1.0,
+            ),
+            BrokerOptionPosition(
+                symbol="NVDA CALL",
+                underlying_symbol="NVDA",
+                expiration=expiration,
+                option_type="CALL",
+                strike=150,
+                side="SHORT",
+                quantity=2,
+                average_price=1.0,
+            ),
+            BrokerOptionPosition(
+                symbol="TSLA PUT",
+                underlying_symbol="TSLA",
+                expiration=expiration,
+                option_type="PUT",
+                strike=300,
+                side="SHORT",
+                quantity=1,
+                average_price=1.0,
+            ),
+        ],
+        {"NVDA": {"lastPrice": 125}, "TSLA": {"lastPrice": 350}},
+        AppConfig(),
+    )
+
+    assert _open_position_counts_by_symbol(rows) == {"NVDA": 4, "TSLA": 1}
 
 
 def test_stock_selector_loads_iv_in_background_before_selecting(monkeypatch) -> None:

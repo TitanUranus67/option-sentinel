@@ -309,6 +309,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                         broker=broker,
                         repository=repository,
                         refresh=refresh,
+                        open_position_counts=_open_position_counts_by_symbol(rows),
                     )
                 dirty = True
                 continue
@@ -1192,6 +1193,7 @@ def _open_new_strangle(
     broker: Broker,
     repository: Repository,
     refresh: BrokerRefreshCoordinator,
+    open_position_counts: dict[str, int],
 ) -> str:
     symbol = _select_stock_symbol(
         stdscr,
@@ -1199,6 +1201,7 @@ def _open_new_strangle(
         config=config,
         broker=broker,
         refresh=refresh,
+        open_position_counts=open_position_counts,
     )
     if symbol is None:
         return "Open cancelled."
@@ -1322,6 +1325,15 @@ def _configured_stock_symbols(symbols: list[str]) -> list[str]:
     return selected
 
 
+def _open_position_counts_by_symbol(rows: list[OptionMonitorRow]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        symbol = row.position.underlying_symbol.strip().upper()
+        if symbol:
+            counts[symbol] = counts.get(symbol, 0) + max(0, row.position.quantity)
+    return counts
+
+
 def _select_stock_symbol(
     stdscr: curses.window,
     symbols: list[str],
@@ -1329,6 +1341,7 @@ def _select_stock_symbol(
     config: AppConfig,
     broker: Broker,
     refresh: BrokerRefreshCoordinator,
+    open_position_counts: dict[str, int] | None = None,
 ) -> str | None:
     choices = _configured_stock_symbols(symbols)
     if not choices:
@@ -1392,6 +1405,7 @@ def _select_stock_symbol(
                     choices,
                     implied_volatilities=implied_volatilities,
                     implied_volatility_errors=implied_volatility_errors,
+                    open_position_counts=open_position_counts,
                     selected_index=selected,
                     scroll=scroll,
                 )
@@ -1407,6 +1421,7 @@ def _select_stock_symbol(
                 choices,
                 implied_volatilities=implied_volatilities,
                 implied_volatility_errors=implied_volatility_errors,
+                open_position_counts=open_position_counts,
                 selected_index=selected,
                 scroll=scroll,
             )
@@ -1469,6 +1484,7 @@ def _draw_stock_symbol_popup(
     *,
     implied_volatilities: dict[str, float | None] | None = None,
     implied_volatility_errors: dict[str, str] | None = None,
+    open_position_counts: dict[str, int] | None = None,
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
@@ -1492,7 +1508,8 @@ def _draw_stock_symbol_popup(
         _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
     _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
     _add_line(stdscr, top + 1, left + 2, "Open new short strangle", box_width - 4, curses.A_BOLD)
-    _add_line(stdscr, top + 2, left + 2, "Select stock       IV", box_width - 4)
+    header = f"{'Select stock':<12} {'IV':>7} {'Open':>6}"
+    _add_line(stdscr, top + 2, left + 2, header, box_width - 4)
 
     visible_symbols: list[str] = []
     if not symbols:
@@ -1504,11 +1521,18 @@ def _draw_stock_symbol_popup(
             iv_loaded = implied_volatilities is not None and symbol in implied_volatilities
             iv = implied_volatilities.get(symbol) if iv_loaded and implied_volatilities is not None else None
             iv_failed = implied_volatility_errors is not None and symbol in implied_volatility_errors
+            open_positions = (open_position_counts or {}).get(symbol, 0)
             _add_menu_item(
                 stdscr,
                 top + 3 + offset,
                 left + 2,
-                _format_symbol_iv(symbol, iv, loaded=iv_loaded, failed=iv_failed),
+                _format_symbol_iv(
+                    symbol,
+                    iv,
+                    loaded=iv_loaded,
+                    failed=iv_failed,
+                    open_positions=open_positions,
+                ),
                 box_width - 4,
                 selected=selected_index == scroll + offset,
             )
@@ -1534,6 +1558,7 @@ def _format_symbol_iv(
     *,
     loaded: bool,
     failed: bool = False,
+    open_positions: int = 0,
 ) -> str:
     if not loaded:
         iv = "..."
@@ -1543,7 +1568,7 @@ def _format_symbol_iv(
         iv = "-"
     else:
         iv = f"{implied_volatility:.1f}%"
-    return f"{symbol:<12} {iv:>7}"
+    return f"{symbol:<12} {iv:>7} {open_positions:>6}"
 
 
 def _select_open_candidate(
