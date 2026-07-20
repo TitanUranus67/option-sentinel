@@ -202,8 +202,10 @@ def test_format_row_contains_close_menu_target_context() -> None:
     assert "-1" in formatted
     assert "0.10" in formatted
     assert "90%" in formatted
+    assert formatted.index("0.66") < formatted.index("90%")
     assert "+59.0%" in formatted
     assert "+12.3%" in formatted
+    assert formatted.index("+12.3%") < formatted.index("+59.0%")
     assert formatted.count("[----|----]") == 3
     assert expiration.isoformat() not in formatted
     assert "1.61" not in formatted

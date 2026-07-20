@@ -461,10 +461,10 @@ def _draw(
         "Qty",
         "DTE",
         "Delta",
-        "POP",
         "Mid",
-        "P/L %",
+        "POP",
         "P/L Day %",
+        "P/L %",
         "Day",
         "30D",
         "52W",
@@ -636,10 +636,10 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
         format_position_quantity(position),
         str(row.dte),
         format_optional_delta(row.delta),
-        format_optional_percent(row.pop),
         format_optional_price(row.mark),
-        format_optional_signed_percent(row.pnl_pct),
+        format_optional_percent(row.pop),
         format_optional_signed_percent(row.day_pnl_pct),
+        format_optional_signed_percent(row.pnl_pct),
         format_range_meter(row.day_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
         format_range_meter(row.day30_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
         format_range_meter(row.week52_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
@@ -655,10 +655,10 @@ def _format_columns(
     qty: str,
     dte: str,
     delta: str,
-    pop: str,
     mid: str,
-    pnl: str,
+    pop: str,
     day_pnl: str,
+    pnl: str,
     day: str,
     day30: str,
     week52: str,
@@ -676,10 +676,10 @@ def _format_columns(
             f"{qty:>2} "
             f"{dte:>3} "
             f"{delta:>5} "
-            f"{pop:>4} "
             f"{mid:>6} "
-            f"{pnl:>7} "
+            f"{pop:>4} "
             f"{day_pnl:>9} "
+            f"{pnl:>7} "
             f"{day:>7} "
             f"{day30:>7} "
             f"{week52:>7} "
@@ -692,10 +692,10 @@ def _format_columns(
         f"{qty:>3} "
         f"{dte:>4} "
         f"{delta:>6} "
-        f"{pop:>5} "
         f"{mid:>7} "
-        f"{pnl:>9} "
+        f"{pop:>5} "
         f"{day_pnl:>9} "
+        f"{pnl:>9} "
         f"{day:>11} "
         f"{day30:>11} "
         f"{week52:>11} "
