@@ -62,6 +62,7 @@ REFRESH_MONITOR = "positions"
 REFRESH_ORDERS = "orders"
 REFRESH_CHARTS = "charts"
 BROKER_SPINNER_FRAMES = ("|", "/", "-", "\\")
+MOUSE_WHEEL_ROWS = 1
 
 
 def run_monitor_tui(*, config: AppConfig, broker: Broker, repository: Repository) -> None:
@@ -72,6 +73,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     curses.curs_set(0)
     _init_colors()
     stdscr.keypad(True)
+    _enable_mouse()
     stdscr.timeout(250)
     active_tab = TAB_MONITOR
     selected = 0
@@ -236,14 +238,15 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 continue
 
             if popup and active_tab == TAB_MONITOR:
+                navigation_delta = _navigation_delta(key, page_size=len(ACTIONS))
                 if key in (27, ord("q"), curses.KEY_LEFT):
                     popup = False
                     dirty = True
-                elif key in (curses.KEY_UP, ord("k")):
-                    popup_selected = max(0, popup_selected - 1)
-                    dirty = True
-                elif key in (curses.KEY_DOWN, ord("j")):
-                    popup_selected = min(len(ACTIONS) - 1, popup_selected + 1)
+                elif navigation_delta:
+                    popup_selected = min(
+                        len(ACTIONS) - 1,
+                        max(0, popup_selected + navigation_delta),
+                    )
                     dirty = True
                 elif key in (10, 13, curses.KEY_ENTER):
                     if time.monotonic() < popup_ignore_enter_until:
@@ -314,12 +317,11 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                     )
                 dirty = True
                 continue
-            if active_tab == TAB_MONITOR and key in (curses.KEY_UP, ord("k")) and rows:
-                selected = max(0, selected - 1)
-                dirty = True
-                continue
-            if active_tab == TAB_MONITOR and key in (curses.KEY_DOWN, ord("j")) and rows:
-                selected = min(len(rows) - 1, selected + 1)
+            height, _ = stdscr.getmaxyx()
+            visible_rows = max(1, height - 5)
+            navigation_delta = _navigation_delta(key, page_size=visible_rows)
+            if active_tab == TAB_MONITOR and navigation_delta and rows:
+                selected = min(len(rows) - 1, max(0, selected + navigation_delta))
                 dirty = True
                 continue
             if active_tab == TAB_MONITOR and key in (10, 13, curses.KEY_ENTER) and rows:
@@ -329,12 +331,11 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 curses.flushinp()
                 dirty = True
                 continue
-            if active_tab == TAB_ORDERS and key in (curses.KEY_UP, ord("k")) and order_rows:
-                order_selected = max(0, order_selected - 1)
-                dirty = True
-                continue
-            if active_tab == TAB_ORDERS and key in (curses.KEY_DOWN, ord("j")) and order_rows:
-                order_selected = min(len(order_rows) - 1, order_selected + 1)
+            if active_tab == TAB_ORDERS and navigation_delta and order_rows:
+                order_selected = min(
+                    len(order_rows) - 1,
+                    max(0, order_selected + navigation_delta),
+                )
                 dirty = True
                 continue
             if active_tab == TAB_ORDERS and key in (10, 13, curses.KEY_ENTER, ord("a"), ord("A")) and order_rows:
@@ -351,24 +352,11 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                     force_order_refresh = True
                 dirty = True
                 continue
-            if active_tab == TAB_CHARTS and key in (curses.KEY_UP, ord("k")):
-                chart_scroll = max(0, chart_scroll - 1)
-                dirty = True
-                continue
-            if active_tab == TAB_CHARTS and key in (curses.KEY_DOWN, ord("j")):
-                height, _ = stdscr.getmaxyx()
-                chart_scroll = min(max(0, len(chart_lines) - max(1, height - 5)), chart_scroll + 1)
-                dirty = True
-                continue
-            if active_tab == TAB_CHARTS and key == curses.KEY_PPAGE:
-                height, _ = stdscr.getmaxyx()
-                chart_scroll = max(0, chart_scroll - max(1, height - 5))
-                dirty = True
-                continue
-            if active_tab == TAB_CHARTS and key == curses.KEY_NPAGE:
-                height, _ = stdscr.getmaxyx()
-                visible_rows = max(1, height - 5)
-                chart_scroll = min(max(0, len(chart_lines) - visible_rows), chart_scroll + visible_rows)
+            if active_tab == TAB_CHARTS and navigation_delta:
+                chart_scroll = min(
+                    max(0, len(chart_lines) - visible_rows),
+                    max(0, chart_scroll + navigation_delta),
+                )
                 dirty = True
                 continue
     finally:
@@ -618,6 +606,47 @@ def _draw_broker_spinner(stdscr: curses.window, *, waiting: bool, frame: int) ->
     except curses.error:
         pass
     stdscr.refresh()
+
+
+def _enable_mouse() -> None:
+    wheel_events = (
+        getattr(curses, "BUTTON4_PRESSED", 0)
+        | getattr(curses, "BUTTON4_CLICKED", 0)
+        | getattr(curses, "BUTTON5_PRESSED", 0)
+        | getattr(curses, "BUTTON5_CLICKED", 0)
+    )
+    if not wheel_events:
+        return
+    try:
+        curses.mousemask(wheel_events)
+        curses.mouseinterval(0)
+    except curses.error:
+        pass
+
+
+def _navigation_delta(key: int, *, page_size: int) -> int:
+    if key in (curses.KEY_UP, ord("k")):
+        return -1
+    if key in (curses.KEY_DOWN, ord("j")):
+        return 1
+    if key == curses.KEY_PPAGE:
+        return -max(1, page_size)
+    if key == curses.KEY_NPAGE:
+        return max(1, page_size)
+    if key != curses.KEY_MOUSE:
+        return 0
+
+    try:
+        _, _, _, _, button_state = curses.getmouse()
+    except curses.error:
+        return 0
+    wheel_up = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(curses, "BUTTON4_CLICKED", 0)
+    wheel_down = getattr(curses, "BUTTON5_PRESSED", 0) | getattr(curses, "BUTTON5_CLICKED", 0)
+    if button_state & wheel_up:
+        return -MOUSE_WHEEL_ROWS
+    if button_state & wheel_down:
+        return MOUSE_WHEEL_ROWS
+    return 0
 
 
 def _is_function_key(key: int, number: int) -> bool:
@@ -1423,15 +1452,14 @@ def _select_stock_symbol(
             key = stdscr.getch()
             if key == -1:
                 continue
+            navigation_delta = _navigation_delta(key, page_size=visible_rows)
             if key in (27, ord("q"), curses.KEY_LEFT):
                 if refresh.waiting:
                     cancel_requested = True
                 else:
                     return None
-            if key in (curses.KEY_UP, ord("k")):
-                selected = max(0, selected - 1)
-            elif key in (curses.KEY_DOWN, ord("j")):
-                selected = min(len(choices) - 1, selected + 1)
+            if navigation_delta:
+                selected = min(len(choices) - 1, max(0, selected + navigation_delta))
             elif key in (10, 13, curses.KEY_ENTER):
                 requested_symbol = choices[selected]
     finally:
@@ -1585,12 +1613,11 @@ def _select_open_candidate(
 
             _draw_open_candidates(stdscr, symbol, candidates, config=config, selected_index=selected, scroll=scroll)
             key = stdscr.getch()
+            navigation_delta = _navigation_delta(key, page_size=visible_rows)
             if key in (27, ord("q"), curses.KEY_LEFT):
                 return None
-            if key in (curses.KEY_UP, ord("k")):
-                selected = max(0, selected - 1)
-            elif key in (curses.KEY_DOWN, ord("j")):
-                selected = min(len(candidates) - 1, selected + 1)
+            if navigation_delta:
+                selected = min(len(candidates) - 1, max(0, selected + navigation_delta))
             elif key in (10, 13, curses.KEY_ENTER):
                 return candidates[selected]
     finally:
@@ -1839,12 +1866,11 @@ def _select_roll_candidate(
 
             _draw_roll_candidates(stdscr, row, candidates, selected_index=selected, scroll=scroll)
             key = stdscr.getch()
+            navigation_delta = _navigation_delta(key, page_size=visible_rows)
             if key in (27, ord("q"), curses.KEY_LEFT):
                 return None
-            if key in (curses.KEY_UP, ord("k")):
-                selected = max(0, selected - 1)
-            elif key in (curses.KEY_DOWN, ord("j")):
-                selected = min(len(candidates) - 1, selected + 1)
+            if navigation_delta:
+                selected = min(len(candidates) - 1, max(0, selected + navigation_delta))
             elif key in (10, 13, curses.KEY_ENTER):
                 return candidates[selected]
     finally:

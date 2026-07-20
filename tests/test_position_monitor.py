@@ -18,6 +18,7 @@ from option_sentinel.monitor_tui import (
     _format_symbol_iv,
     _monitor_status,
     _monitor_row_attr,
+    _navigation_delta,
     _open_position_counts_by_symbol,
     _open_candidate_strangle_with_confirmation,
     _order_legs_summary,
@@ -129,6 +130,19 @@ def test_broker_spinner_draws_only_in_bottom_right_while_waiting() -> None:
 
     assert calls[0][:4] == (29, 158, "/", 1)
     assert calls[1] == ("refresh",)
+
+
+def test_navigation_delta_supports_arrows_pages_and_mouse_wheel(monkeypatch) -> None:
+    assert _navigation_delta(curses.KEY_UP, page_size=12) == -1
+    assert _navigation_delta(curses.KEY_DOWN, page_size=12) == 1
+    assert _navigation_delta(curses.KEY_PPAGE, page_size=12) == -12
+    assert _navigation_delta(curses.KEY_NPAGE, page_size=12) == 12
+
+    monkeypatch.setattr(curses, "getmouse", lambda: (0, 0, 0, 0, curses.BUTTON4_PRESSED))
+    assert _navigation_delta(curses.KEY_MOUSE, page_size=12) == -1
+
+    monkeypatch.setattr(curses, "getmouse", lambda: (0, 0, 0, 0, curses.BUTTON5_PRESSED))
+    assert _navigation_delta(curses.KEY_MOUSE, page_size=12) == 1
 
 
 def test_parse_broker_option_positions_sorts_lowest_dte_first() -> None:
