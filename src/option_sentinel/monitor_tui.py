@@ -29,6 +29,7 @@ from .position_monitor import (
     format_optional_percent,
     format_optional_price,
     format_optional_signed_percent,
+    format_position_quantity,
     format_range_meter,
     format_today_pnl,
     format_total_theta,
@@ -457,13 +458,13 @@ def _draw(
     header = _format_columns(
         "Symbol",
         "Option",
-        "Side",
         "Qty",
         "DTE",
         "Delta",
         "POP",
         "Mid",
         "P/L %",
+        "P/L Day %",
         "Day",
         "30D",
         "52W",
@@ -632,13 +633,13 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
     return _format_columns(
         position.underlying_symbol,
         f"{position.option_type[0]} {position.strike:g}",
-        position.side,
-        str(position.quantity),
+        format_position_quantity(position),
         str(row.dte),
         format_optional_delta(row.delta),
         format_optional_percent(row.pop),
         format_optional_price(row.mark),
         format_optional_signed_percent(row.pnl_pct),
+        format_optional_signed_percent(row.day_pnl_pct),
         format_range_meter(row.day_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
         format_range_meter(row.day30_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
         format_range_meter(row.week52_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
@@ -651,13 +652,13 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
 def _format_columns(
     symbol: str,
     option: str,
-    side: str,
     qty: str,
     dte: str,
     delta: str,
     pop: str,
     mid: str,
     pnl: str,
+    day_pnl: str,
     day: str,
     day30: str,
     week52: str,
@@ -667,51 +668,40 @@ def _format_columns(
     width: int | None = None,
 ) -> str:
     if width is not None and width < FULL_MONITOR_WIDTH:
-        side = _compact_side(side)
         alert = _compact_alert(alert)
+        closing = "Close" if closing == "Closing" else closing
         return (
             f"{symbol:<6} "
-            f"{option:<8} "
-            f"{side:<4} "
+            f"{option:<7} "
             f"{qty:>2} "
             f"{dte:>3} "
             f"{delta:>5} "
             f"{pop:>4} "
             f"{mid:>6} "
             f"{pnl:>7} "
+            f"{day_pnl:>9} "
             f"{day:>7} "
             f"{day30:>7} "
             f"{week52:>7} "
             f"{alert:<12} "
-            f"{closing:<7}"
+            f"{closing:<5}"
         )
     return (
         f"{symbol:<6} "
         f"{option:<8} "
-        f"{side:<5} "
         f"{qty:>3} "
         f"{dte:>4} "
         f"{delta:>6} "
         f"{pop:>5} "
         f"{mid:>7} "
         f"{pnl:>9} "
+        f"{day_pnl:>9} "
         f"{day:>11} "
         f"{day30:>11} "
         f"{week52:>11} "
         f"{alert:<21} "
         f"{closing:<7}"
     )
-
-
-def _compact_side(side: str) -> str:
-    normalized = side.upper()
-    if normalized == "SIDE":
-        return "Side"
-    if normalized == "SHORT":
-        return "S"
-    if normalized == "LONG":
-        return "L"
-    return side[:1]
 
 
 def _compact_alert(alert: str) -> str:

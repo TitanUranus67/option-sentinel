@@ -30,6 +30,7 @@ class OptionMonitorRow:
     alert: str
     theta: float | None = None
     today_pnl: float | None = None
+    day_pnl_pct: float | None = None
     day_range: PriceRange | None = None
     day30_range: PriceRange | None = None
     week52_range: PriceRange | None = None
@@ -94,6 +95,7 @@ def build_monitor_rows_from_quotes(
                 ),
                 theta=theta,
                 today_pnl=today_pnl,
+                day_pnl_pct=option_position_day_pnl_pct(position, quotes, mark=mark),
                 day_range=day_range_from_quote(quotes, position.underlying_symbol, current=underlying_price),
                 day30_range=_range_for_symbol(day30_ranges, position.underlying_symbol)
                 or day30_range_from_quote(quotes, position.underlying_symbol, current=underlying_price),
@@ -177,6 +179,50 @@ def option_position_today_pnl(
         return None
     side_multiplier = -1 if position.side == "SHORT" else 1
     return round(price_change * position.quantity * 100 * side_multiplier, 2)
+
+
+def option_position_day_pnl_pct(
+    position: BrokerOptionPosition,
+    quotes: dict[str, Any],
+    *,
+    mark: float | None,
+) -> float | None:
+    if position.day_pnl_pct is not None:
+        return position.day_pnl_pct
+
+    quote = quote_for(quotes, position.symbol)
+    price_change = first_quote_float(
+        quote,
+        "markChange",
+        "netChange",
+        "regularMarketNetChange",
+        "change",
+        "priceChange",
+    )
+    previous_close = first_quote_float(
+        quote,
+        "previousClose",
+        "previousClosePrice",
+        "prevClose",
+        "priorClose",
+        "regularMarketPreviousClose",
+        "closePrice",
+        "close",
+    )
+    if previous_close is None and mark is not None and price_change is not None:
+        previous_close = mark - price_change
+    if price_change is None and mark is not None and previous_close is not None:
+        price_change = mark - previous_close
+    if price_change is None or previous_close is None or previous_close <= 0:
+        return None
+
+    side_multiplier = -1 if position.side == "SHORT" else 1
+    return round(price_change / previous_close * side_multiplier, 6)
+
+
+def format_position_quantity(position: BrokerOptionPosition) -> str:
+    sign = -1 if position.side == "SHORT" else 1
+    return f"{position.quantity * sign:+d}"
 
 
 def option_position_alert(

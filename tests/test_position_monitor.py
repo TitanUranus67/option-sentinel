@@ -41,6 +41,7 @@ from option_sentinel.position_monitor import (
     day30_range_from_quote,
     day_range_from_quote,
     format_closing_order_flag,
+    format_position_quantity,
     delta_from_quote,
     format_today_pnl,
     format_total_theta,
@@ -94,6 +95,7 @@ def test_build_monitor_rows_includes_short_and_long_options() -> None:
     assert [row.position.symbol for row in rows] == ["TSLA  260717P00370000", "NOK   270618C00017000"]
     assert rows[0].pnl_pct == 0.625
     assert rows[0].delta == -0.16
+    assert [format_position_quantity(row.position) for row in rows] == ["-1", "+10"]
     assert rows[0].theta == -0.03
     assert rows[0].pop == 0.84
     assert rows[0].alert == "OK"
@@ -149,6 +151,7 @@ def test_parse_broker_option_positions_sorts_lowest_dte_first() -> None:
             "shortQuantity": 1,
             "averagePrice": 1.61,
             "currentDayProfitLoss": 12.34,
+            "currentDayProfitLossPercentage": 7.65,
         },
     ]
 
@@ -157,6 +160,7 @@ def test_parse_broker_option_positions_sorts_lowest_dte_first() -> None:
     assert [position.underlying_symbol for position in parsed] == ["NVDA", "TSLA"]
     assert [position.expiration for position in parsed] == [near, far]
     assert parsed[0].today_pnl == 12.34
+    assert parsed[0].day_pnl_pct == 0.0765
 
 
 def test_format_row_contains_close_menu_target_context() -> None:
@@ -172,6 +176,7 @@ def test_format_row_contains_close_menu_target_context() -> None:
                 side="SHORT",
                 quantity=1,
                 average_price=1.61,
+                day_pnl_pct=0.1234,
             )
         ],
         {
@@ -193,10 +198,12 @@ def test_format_row_contains_close_menu_target_context() -> None:
 
     assert "NVDA" in formatted
     assert "C 220" in formatted
-    assert "SHORT" in formatted
+    assert "SHORT" not in formatted
+    assert "-1" in formatted
     assert "0.10" in formatted
     assert "90%" in formatted
     assert "+59.0%" in formatted
+    assert "+12.3%" in formatted
     assert formatted.count("[----|----]") == 3
     assert expiration.isoformat() not in formatted
     assert "1.61" not in formatted
@@ -776,6 +783,8 @@ def test_total_today_pnl_uses_quote_change_side_and_quantity() -> None:
 
     assert rows[0].today_pnl == -10.0
     assert rows[1].today_pnl == 20.0
+    assert rows[0].day_pnl_pct == -0.034483
+    assert rows[1].day_pnl_pct == 0.07722
     assert total_today_pnl(rows) == 10.0
     assert format_today_pnl(total_today_pnl(rows)) == "+$10.00"
 

@@ -21,6 +21,7 @@ class BrokerOptionPosition:
     quantity: int
     average_price: float | None
     today_pnl: float | None = None
+    day_pnl_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,7 @@ def parse_option_position(position: dict[str, Any]) -> BrokerOptionPosition | No
         quantity=quantity,
         average_price=_average_price(position, instrument),
         today_pnl=_today_pnl(position, instrument),
+        day_pnl_pct=_day_pnl_pct(position, instrument),
     )
 
 
@@ -279,6 +281,22 @@ def _today_pnl(position: dict[str, Any], instrument: dict[str, Any]) -> float | 
             value = _as_float(source.get(key))
             if value is not None:
                 return round(value, 2)
+    return None
+
+
+def _day_pnl_pct(position: dict[str, Any], instrument: dict[str, Any]) -> float | None:
+    for source in (position, instrument):
+        for key in (
+            "currentDayProfitLossPercentage",
+            "currentDayProfitLossPercent",
+            "dayProfitLossPercentage",
+            "dayProfitLossPercent",
+            "todayProfitLossPercentage",
+            "todayProfitLossPercent",
+        ):
+            value = _as_float(source.get(key))
+            if value is not None:
+                return round(value / 100, 6)
     return None
 
 

@@ -28,6 +28,7 @@ from .position_monitor import (
     format_optional_percent,
     format_optional_price,
     format_optional_signed_percent,
+    format_position_quantity,
     format_range_meter,
     format_today_pnl,
     format_total_theta,
@@ -396,13 +397,13 @@ def monitor(
         table = Table(title=f"Option positions | total theta {theta} | today P/L {today_pnl}")
         table.add_column("Symbol")
         table.add_column("Option")
-        table.add_column("Side")
         table.add_column("Qty", justify="right")
         table.add_column("DTE", justify="right")
         table.add_column("Delta", justify="right")
         table.add_column("POP", justify="right")
         table.add_column("Mid", justify="right")
         table.add_column("P/L %", justify="right")
+        table.add_column("P/L Day %", justify="right")
         table.add_column("Day", justify="right")
         table.add_column("30D", justify="right")
         table.add_column("52W", justify="right")
@@ -418,13 +419,13 @@ def monitor(
             table.add_row(
                 position.underlying_symbol,
                 f"{position.option_type[0]} {position.strike:g}",
-                position.side,
-                str(position.quantity),
+                format_position_quantity(position),
                 str(row.dte),
                 format_optional_delta(row.delta),
                 format_optional_percent(row.pop),
                 format_optional_price(row.mark),
                 format_optional_signed_percent(row.pnl_pct),
+                format_optional_signed_percent(row.day_pnl_pct),
                 format_range_meter(row.day_range),
                 format_range_meter(row.day30_range),
                 format_range_meter(row.week52_range),
