@@ -22,7 +22,8 @@ from .order_status import open_closing_order_symbols, refresh_order_status_rows
 from .persistence import Repository
 from .position_monitor import (
     apply_closing_order_flags,
-    build_monitor_rows,
+    build_monitor_snapshot,
+    format_account_value_line,
     format_closing_order_flag,
     format_optional_delta,
     format_optional_percent,
@@ -388,13 +389,18 @@ def monitor(
         return
 
     def render() -> Table:
-        rows = build_monitor_rows(broker, config)
+        rows, account_summary = build_monitor_snapshot(broker, config)
         order_drafts = repository.list_order_drafts(only_today=True)
         order_rows, _ = refresh_order_status_rows(order_drafts, broker, repository)
         rows = apply_closing_order_flags(rows, open_closing_order_symbols(order_rows))
         theta = format_total_theta(total_position_theta(rows))
         today_pnl = format_today_pnl(total_today_pnl(rows))
-        table = Table(title=f"Option positions | total theta {theta} | today P/L {today_pnl}")
+        table = Table(
+            title=(
+                f"Option positions | total theta {theta} | today P/L {today_pnl}\n"
+                f"{format_account_value_line(account_summary)}"
+            )
+        )
         table.add_column("Symbol")
         table.add_column("Price", justify="right")
         table.add_column("Option")

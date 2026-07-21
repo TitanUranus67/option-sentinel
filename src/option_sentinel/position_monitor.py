@@ -19,6 +19,12 @@ class PriceRange:
 
 
 @dataclass(frozen=True)
+class AccountValueSummary:
+    total_value: float | None
+    day_change: float | None
+
+
+@dataclass(frozen=True)
 class OptionMonitorRow:
     position: BrokerOptionPosition
     mark: float | None
@@ -47,7 +53,33 @@ class OptionMonitorRow:
 
 
 def build_monitor_rows(broker: Broker, config: AppConfig) -> list[OptionMonitorRow]:
-    positions = parse_broker_option_positions(broker.get_positions())
+    return _build_monitor_rows_for_positions(broker, config, broker.get_positions())
+
+
+def build_monitor_snapshot(
+    broker: Broker,
+    config: AppConfig,
+) -> tuple[list[OptionMonitorRow], AccountValueSummary]:
+    get_account = getattr(broker, "get_account", None)
+    if not callable(get_account):
+        return build_monitor_rows(broker, config), AccountValueSummary(total_value=None, day_change=None)
+    account = get_account()
+    securities_account = account.get("securitiesAccount", account)
+    raw_positions = securities_account.get("positions") if isinstance(securities_account, dict) else None
+    if not isinstance(raw_positions, list):
+        raw_positions = broker.get_positions()
+    return (
+        _build_monitor_rows_for_positions(broker, config, raw_positions),
+        account_value_summary(account),
+    )
+
+
+def _build_monitor_rows_for_positions(
+    broker: Broker,
+    config: AppConfig,
+    raw_positions: list[dict[str, Any]],
+) -> list[OptionMonitorRow]:
+    positions = parse_broker_option_positions(raw_positions)
     if not positions:
         return []
     symbols = sorted({position.symbol for position in positions} | {position.underlying_symbol for position in positions})
@@ -60,6 +92,33 @@ def build_monitor_rows(broker: Broker, config: AppConfig) -> list[OptionMonitorR
         days=TRAILING_RANGE_DAYS,
     )
     return build_monitor_rows_from_quotes(positions, quotes, config, day30_ranges=day30_ranges)
+
+
+def account_value_summary(account: dict[str, Any]) -> AccountValueSummary:
+    securities_account = account.get("securitiesAccount", account)
+    if not isinstance(securities_account, dict):
+        return AccountValueSummary(total_value=None, day_change=None)
+    current_balances = securities_account.get("currentBalances")
+    initial_balances = securities_account.get("initialBalances")
+    current = current_balances if isinstance(current_balances, dict) else {}
+    initial = initial_balances if isinstance(initial_balances, dict) else {}
+    total_value = first_float(
+        current.get("liquidationValue"),
+        current.get("accountValue"),
+        securities_account.get("liquidationValue"),
+        securities_account.get("accountValue"),
+    )
+    day_change = first_float(
+        current.get("currentDayProfitLoss"),
+        securities_account.get("currentDayProfitLoss"),
+    )
+    prior_value = first_float(initial.get("accountValue"), initial.get("liquidationValue"))
+    if day_change is None and total_value is not None and prior_value is not None:
+        day_change = total_value - prior_value
+    return AccountValueSummary(
+        total_value=round(total_value, 2) if total_value is not None else None,
+        day_change=round(day_change, 2) if day_change is not None else None,
+    )
 
 
 def build_monitor_rows_from_quotes(
@@ -503,6 +562,11 @@ def format_today_pnl(value: float | None) -> str:
     rounded = round(value, 2)
     sign = "+" if rounded >= 0 else "-"
     return f"{sign}${abs(rounded):,.2f}"
+
+
+def format_account_value_line(summary: AccountValueSummary) -> str:
+    total_value = "-" if summary.total_value is None else f"${summary.total_value:,.2f}"
+    return f"Total account value {total_value} - Total day change {format_today_pnl(summary.day_change)}"
 
 
 def format_total_theta(value: float | None) -> str:

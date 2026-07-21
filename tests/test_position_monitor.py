@@ -36,12 +36,16 @@ from option_sentinel.persistence import Repository
 from option_sentinel.position_import import BrokerOptionPosition
 from option_sentinel.position_monitor import (
     PriceRange,
+    AccountValueSummary,
+    account_value_summary,
     apply_closing_order_flags,
     build_monitor_rows,
+    build_monitor_snapshot,
     build_monitor_rows_from_quotes,
     day30_range_from_quote,
     day_range_from_quote,
     format_closing_order_flag,
+    format_account_value_line,
     format_position_quantity,
     delta_from_quote,
     format_today_pnl,
@@ -883,6 +887,29 @@ def test_monitor_status_shows_total_theta_and_today_pnl_after_open_position_coun
     status = _monitor_status(rows, refreshed_at=datetime(2026, 7, 2, 15, 30, 0))
 
     assert status == "3 open positions | total theta +$7.00/day | today P/L +$5.50 | refreshed 15:30:00"
+
+
+def test_account_value_line_shows_total_value_and_total_day_change() -> None:
+    summary = account_value_summary(
+        {
+            "securitiesAccount": {
+                "currentBalances": {"liquidationValue": 125_432.10},
+                "initialBalances": {"accountValue": 124_900.00},
+            }
+        }
+    )
+
+    assert summary == AccountValueSummary(total_value=125_432.10, day_change=532.10)
+    assert format_account_value_line(summary) == (
+        "Total account value $125,432.10 - Total day change +$532.10"
+    )
+
+
+def test_fake_monitor_snapshot_reuses_account_positions_and_includes_account_value() -> None:
+    rows, summary = build_monitor_snapshot(FakeBroker(as_of=date(2026, 7, 1)), AppConfig())
+
+    assert len(rows) == 2
+    assert summary == AccountValueSummary(total_value=125_000, day_change=500)
 
 
 def test_roll_candidate_list_uses_available_room_for_twelve_rows() -> None:

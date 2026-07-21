@@ -21,9 +21,12 @@ from .order_status import (
 from .orders import build_close_option_order, build_open_order, build_roll_option_order
 from .persistence import Repository
 from .position_monitor import (
+    AccountValueSummary,
     OptionMonitorRow,
     apply_closing_order_flags,
     build_monitor_rows,
+    build_monitor_snapshot,
+    format_account_value_line,
     format_closing_order_flag,
     format_optional_delta,
     format_optional_percent,
@@ -80,6 +83,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     scroll = 0
     rows: list[OptionMonitorRow] = []
     status = "Loading positions..."
+    account_status = "Total account value ... - Total day change ..."
     order_selected = 0
     order_scroll = 0
     order_rows: list[OrderStatusRow] = []
@@ -111,10 +115,11 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                         status = f"Refresh failed: {completed.error}"
                     else:
                         last_order_refresh = completed_at
-                        rows, order_rows, live_status_note = completed.value
+                        rows, order_rows, live_status_note, account_summary = completed.value
                         selected = min(selected, max(0, len(rows) - 1))
                         order_selected = min(order_selected, max(0, len(order_rows) - 1))
                         status = _monitor_status(rows, refreshed_at=refreshed_at)
+                        account_status = format_account_value_line(account_summary)
                         if live_status_note:
                             status = f"{status} | orders {live_status_note}"
                         order_status = _order_refresh_status(order_rows, live_status_note, refreshed_at=refreshed_at)
@@ -188,7 +193,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
 
             if dirty:
                 height, _ = stdscr.getmaxyx()
-                visible_rows = max(1, height - 5)
+                visible_rows = max(1, height - (6 if active_tab == TAB_MONITOR else 5))
                 if active_tab == TAB_MONITOR:
                     if selected < scroll:
                         scroll = selected
@@ -200,6 +205,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                         selected=selected,
                         scroll=scroll,
                         status=status,
+                        account_status=account_status,
                         popup=popup,
                         popup_selected=popup_selected,
                         active_tab=active_tab,
@@ -318,7 +324,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 dirty = True
                 continue
             height, _ = stdscr.getmaxyx()
-            visible_rows = max(1, height - 5)
+            visible_rows = max(1, height - (6 if active_tab == TAB_MONITOR else 5))
             navigation_delta = _navigation_delta(key, page_size=visible_rows)
             if active_tab == TAB_MONITOR and navigation_delta and rows:
                 selected = min(len(rows) - 1, max(0, selected + navigation_delta))
@@ -368,11 +374,11 @@ def _build_monitor_rows_with_open_closing_orders(
     broker: Broker,
     config: AppConfig,
     repository: Repository,
-) -> tuple[list[OptionMonitorRow], list[OrderStatusRow], str | None]:
-    rows = build_monitor_rows(broker, config)
+) -> tuple[list[OptionMonitorRow], list[OrderStatusRow], str | None, AccountValueSummary]:
+    rows, account_summary = build_monitor_snapshot(broker, config)
     order_rows, live_status_note = _refresh_todays_order_rows(broker=broker, repository=repository)
     closing_order_symbols = open_closing_order_symbols(order_rows)
-    return apply_closing_order_flags(rows, closing_order_symbols), order_rows, live_status_note
+    return apply_closing_order_flags(rows, closing_order_symbols), order_rows, live_status_note, account_summary
 
 
 def _refresh_todays_order_rows(*, broker: Broker, repository: Repository) -> tuple[list[OrderStatusRow], str | None]:
@@ -427,6 +433,7 @@ def _draw(
     selected: int,
     scroll: int,
     status: str,
+    account_status: str,
     popup: bool,
     popup_selected: int,
     active_tab: int,
@@ -442,6 +449,7 @@ def _draw(
         curses.A_BOLD,
     )
     _add_line(stdscr, 1, 0, status, width)
+    _add_line(stdscr, 2, 0, account_status, width)
 
     header = _format_columns(
         "Symbol",
@@ -461,14 +469,14 @@ def _draw(
         "Closing",
         width=width,
     )
-    _add_line(stdscr, 3, 0, header, width, curses.A_UNDERLINE)
+    _add_line(stdscr, 4, 0, header, width, curses.A_UNDERLINE)
 
-    visible_rows = max(1, height - 5)
+    visible_rows = max(1, height - 6)
     if not rows:
-        _add_line(stdscr, 4, 0, "No option positions.", width)
+        _add_line(stdscr, 5, 0, "No option positions.", width)
     else:
-        for screen_index, row in enumerate(rows[scroll : scroll + visible_rows], start=4):
-            absolute_index = scroll + screen_index - 4
+        for screen_index, row in enumerate(rows[scroll : scroll + visible_rows], start=5):
+            absolute_index = scroll + screen_index - 5
             attr = _monitor_row_attr(row, selected=absolute_index == selected)
             _add_line(stdscr, screen_index, 0, _format_row(row, width=width), width, attr)
 

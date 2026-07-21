@@ -31,9 +31,16 @@ class FakeBroker(Broker):
 
     def get_account(self) -> dict[str, Any]:
         return {
-            "accountId": "FAKE",
-            "cashBalance": 100_000,
-            "mode": "fake",
+            "securitiesAccount": {
+                "accountId": "FAKE",
+                "currentBalances": {
+                    "cashBalance": 100_000,
+                    "liquidationValue": 125_000,
+                },
+                "initialBalances": {"accountValue": 124_500},
+                "positions": self.get_positions(),
+                "mode": "fake",
+            }
         }
 
     def get_positions(self) -> list[dict[str, Any]]:
