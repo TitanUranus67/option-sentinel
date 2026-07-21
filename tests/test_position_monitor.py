@@ -211,7 +211,9 @@ def test_format_row_contains_close_menu_target_context() -> None:
     formatted = _format_row(row)
 
     assert "NVDA" in formatted
+    assert "200.00" in formatted
     assert "C 220" in formatted
+    assert formatted.index("NVDA") < formatted.index("200.00") < formatted.index("C 220")
     assert "SHORT" not in formatted
     assert "-1" in formatted
     assert "0.10" in formatted
@@ -288,7 +290,7 @@ def test_format_row_uses_compact_range_meters_when_full_layout_does_not_fit() ->
     formatted = _format_row(row, width=100)
 
     assert len(formatted) <= 100
-    assert formatted.count("[--|--]") == 3
+    assert formatted.count("[-|-]") == 3
     assert "OK" in formatted
 
 

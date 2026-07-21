@@ -396,6 +396,7 @@ def monitor(
         today_pnl = format_today_pnl(total_today_pnl(rows))
         table = Table(title=f"Option positions | total theta {theta} | today P/L {today_pnl}")
         table.add_column("Symbol")
+        table.add_column("Price", justify="right")
         table.add_column("Option")
         table.add_column("Qty", justify="right")
         table.add_column("DTE", justify="right")
@@ -411,13 +412,14 @@ def monitor(
         table.add_column("Closing")
 
         if not rows:
-            table.add_row("-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "No option positions", "-")
+            table.add_row("-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "No option positions", "-")
             return table
 
         for row in rows:
             position = row.position
             table.add_row(
                 position.underlying_symbol,
+                format_optional_price(row.underlying_price),
                 f"{position.option_type[0]} {position.strike:g}",
                 format_position_quantity(position),
                 str(row.dte),

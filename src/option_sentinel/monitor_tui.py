@@ -445,6 +445,7 @@ def _draw(
 
     header = _format_columns(
         "Symbol",
+        "Price",
         "Option",
         "Qty",
         "DTE",
@@ -661,6 +662,7 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
     position = row.position
     return _format_columns(
         position.underlying_symbol,
+        format_optional_price(row.underlying_price),
         f"{position.option_type[0]} {position.strike:g}",
         format_position_quantity(position),
         str(row.dte),
@@ -669,9 +671,9 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
         format_optional_percent(row.pop),
         format_optional_signed_percent(row.day_pnl_pct),
         format_optional_signed_percent(row.pnl_pct),
-        format_range_meter(row.day_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
-        format_range_meter(row.day30_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
-        format_range_meter(row.week52_range, width=7 if width is not None and width < FULL_MONITOR_WIDTH else 11),
+        format_range_meter(row.day_range, width=_monitor_meter_width(width)),
+        format_range_meter(row.day30_range, width=_monitor_meter_width(width)),
+        format_range_meter(row.week52_range, width=_monitor_meter_width(width)),
         row.display_alert,
         format_closing_order_flag(row.has_closing_order),
         width=width,
@@ -680,6 +682,7 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
 
 def _format_columns(
     symbol: str,
+    ticker_price: str,
     option: str,
     qty: str,
     dte: str,
@@ -699,9 +702,11 @@ def _format_columns(
     if width is not None and width < FULL_MONITOR_WIDTH:
         alert = _compact_alert(alert)
         closing = "Close" if closing == "Closing" else closing
+        meter_width = _monitor_meter_width(width)
         return (
             f"{symbol:<6} "
-            f"{option:<7} "
+            f"{ticker_price:>6} "
+            f"{option:<6} "
             f"{qty:>2} "
             f"{dte:>3} "
             f"{delta:>5} "
@@ -709,14 +714,15 @@ def _format_columns(
             f"{pop:>4} "
             f"{day_pnl:>9} "
             f"{pnl:>7} "
-            f"{day:>7} "
-            f"{day30:>7} "
-            f"{week52:>7} "
+            f"{day:>{meter_width}} "
+            f"{day30:>{meter_width}} "
+            f"{week52:>{meter_width}} "
             f"{alert:<12} "
             f"{closing:<5}"
         )
     return (
         f"{symbol:<6} "
+        f"{ticker_price:>6} "
         f"{option:<8} "
         f"{qty:>3} "
         f"{dte:>4} "
@@ -731,6 +737,14 @@ def _format_columns(
         f"{alert:<21} "
         f"{closing:<7}"
     )
+
+
+def _monitor_meter_width(width: int | None) -> int:
+    if width is not None and width < 107:
+        return 5
+    if width is not None and width < FULL_MONITOR_WIDTH:
+        return 7
+    return 11
 
 
 def _compact_alert(alert: str) -> str:
