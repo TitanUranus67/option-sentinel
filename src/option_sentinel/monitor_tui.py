@@ -83,7 +83,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     scroll = 0
     rows: list[OptionMonitorRow] = []
     status = "Loading positions..."
-    account_status = "Total account value ... - Total day change ..."
+    account_status = "Total account value ... - Total day change ... - Current cash balance ..."
     order_selected = 0
     order_scroll = 0
     order_rows: list[OrderStatusRow] = []
@@ -451,24 +451,7 @@ def _draw(
     _add_line(stdscr, 1, 0, status, width)
     _add_line(stdscr, 2, 0, account_status, width)
 
-    header = _format_columns(
-        "Symbol",
-        "Price",
-        "Option",
-        "Qty",
-        "DTE",
-        "Delta",
-        "Mid",
-        "POP",
-        "P/L Day %",
-        "P/L %",
-        "Day",
-        "30D",
-        "52W",
-        "Alert",
-        "Closing",
-        width=width,
-    )
+    header = _format_monitor_header(width=width)
     _add_line(stdscr, 4, 0, header, width, curses.A_UNDERLINE)
 
     visible_rows = max(1, height - 6)
@@ -688,6 +671,28 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
     )
 
 
+def _format_monitor_header(*, width: int | None = None) -> str:
+    return _format_columns(
+        "Symbol",
+        "Price",
+        "Option",
+        "Qty",
+        "DTE",
+        "Delta",
+        "Mid",
+        "POP",
+        "P/L Day %",
+        "P/L %",
+        "Day",
+        "30D",
+        "52W",
+        "Alert",
+        "Closing",
+        width=width,
+        header=True,
+    )
+
+
 def _format_columns(
     symbol: str,
     ticker_price: str,
@@ -706,28 +711,38 @@ def _format_columns(
     closing: str,
     *,
     width: int | None = None,
+    header: bool = False,
 ) -> str:
     if width is not None and width < FULL_MONITOR_WIDTH:
         alert = _compact_alert(alert)
         closing = "Close" if closing == "Closing" else closing
         meter_width = _monitor_meter_width(width)
+        qty_width = 2 if width < 107 else 3
+        if header and qty_width == 2:
+            qty = "Q"
+        day_column = f"{day:^{meter_width}}" if header else f"{day:>{meter_width}}"
+        day30_column = f"{day30:^{meter_width}}" if header else f"{day30:>{meter_width}}"
+        week52_column = f"{week52:^{meter_width}}" if header else f"{week52:>{meter_width}}"
         return (
             f"{symbol:<6} "
             f"{ticker_price:>6} "
             f"{option:<6} "
-            f"{qty:>2} "
+            f"{qty:>{qty_width}} "
             f"{dte:>3} "
             f"{delta:>5} "
             f"{mid:>6} "
             f"{pop:>4} "
             f"{day_pnl:>9} "
             f"{pnl:>7} "
-            f"{day:>{meter_width}} "
-            f"{day30:>{meter_width}} "
-            f"{week52:>{meter_width}} "
+            f"{day_column} "
+            f"{day30_column} "
+            f"{week52_column} "
             f"{alert:<12} "
             f"{closing:<5}"
         )
+    day_column = f"{day:^11}" if header else f"{day:>11}"
+    day30_column = f"{day30:^11}" if header else f"{day30:>11}"
+    week52_column = f"{week52:^11}" if header else f"{week52:>11}"
     return (
         f"{symbol:<6} "
         f"{ticker_price:>6} "
@@ -739,9 +754,9 @@ def _format_columns(
         f"{pop:>5} "
         f"{day_pnl:>9} "
         f"{pnl:>9} "
-        f"{day:>11} "
-        f"{day30:>11} "
-        f"{week52:>11} "
+        f"{day_column} "
+        f"{day30_column} "
+        f"{week52_column} "
         f"{alert:<21} "
         f"{closing:<7}"
     )

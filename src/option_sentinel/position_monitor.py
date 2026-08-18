@@ -22,6 +22,7 @@ class PriceRange:
 class AccountValueSummary:
     total_value: float | None
     day_change: float | None
+    cash_balance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,11 @@ def build_monitor_snapshot(
 ) -> tuple[list[OptionMonitorRow], AccountValueSummary]:
     get_account = getattr(broker, "get_account", None)
     if not callable(get_account):
-        return build_monitor_rows(broker, config), AccountValueSummary(total_value=None, day_change=None)
+        return build_monitor_rows(broker, config), AccountValueSummary(
+            total_value=None,
+            day_change=None,
+            cash_balance=None,
+        )
     account = get_account()
     securities_account = account.get("securitiesAccount", account)
     raw_positions = securities_account.get("positions") if isinstance(securities_account, dict) else None
@@ -97,7 +102,7 @@ def _build_monitor_rows_for_positions(
 def account_value_summary(account: dict[str, Any]) -> AccountValueSummary:
     securities_account = account.get("securitiesAccount", account)
     if not isinstance(securities_account, dict):
-        return AccountValueSummary(total_value=None, day_change=None)
+        return AccountValueSummary(total_value=None, day_change=None, cash_balance=None)
     current_balances = securities_account.get("currentBalances")
     initial_balances = securities_account.get("initialBalances")
     current = current_balances if isinstance(current_balances, dict) else {}
@@ -112,12 +117,17 @@ def account_value_summary(account: dict[str, Any]) -> AccountValueSummary:
         current.get("currentDayProfitLoss"),
         securities_account.get("currentDayProfitLoss"),
     )
+    cash_balance = first_float(current.get("cashBalance"))
+    margin_balance = first_float(current.get("marginBalance"))
+    if margin_balance not in (None, 0):
+        cash_balance = margin_balance
     prior_value = first_float(initial.get("accountValue"), initial.get("liquidationValue"))
     if day_change is None and total_value is not None and prior_value is not None:
         day_change = total_value - prior_value
     return AccountValueSummary(
         total_value=round(total_value, 2) if total_value is not None else None,
         day_change=round(day_change, 2) if day_change is not None else None,
+        cash_balance=round(cash_balance, 2) if cash_balance is not None else None,
     )
 
 
@@ -565,8 +575,19 @@ def format_today_pnl(value: float | None) -> str:
 
 
 def format_account_value_line(summary: AccountValueSummary) -> str:
-    total_value = "-" if summary.total_value is None else f"${summary.total_value:,.2f}"
-    return f"Total account value {total_value} - Total day change {format_today_pnl(summary.day_change)}"
+    total_value = format_currency(summary.total_value)
+    cash_balance = format_currency(summary.cash_balance)
+    return (
+        f"Total account value {total_value} - Total day change {format_today_pnl(summary.day_change)}"
+        f" - Current cash balance {cash_balance}"
+    )
+
+
+def format_currency(value: float | None) -> str:
+    if value is None:
+        return "-"
+    sign = "-" if value < 0 else ""
+    return f"{sign}${abs(value):,.2f}"
 
 
 def format_total_theta(value: float | None) -> str:

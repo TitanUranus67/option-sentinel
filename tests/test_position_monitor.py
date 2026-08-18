@@ -14,6 +14,7 @@ from option_sentinel.monitor_tui import (
     _close_selected_option_with_confirmation,
     _configured_stock_symbols,
     _format_order_row,
+    _format_monitor_header,
     _format_row,
     _format_symbol_iv,
     _monitor_status,
@@ -296,6 +297,46 @@ def test_format_row_uses_compact_range_meters_when_full_layout_does_not_fit() ->
     assert len(formatted) <= 100
     assert formatted.count("[-|-]") == 3
     assert "OK" in formatted
+
+
+def test_monitor_header_aligns_with_compact_row_values() -> None:
+    expiration = date.today() + timedelta(days=30)
+    row = build_monitor_rows_from_quotes(
+        [
+            BrokerOptionPosition(
+                symbol="NVDA  260717C00220000",
+                underlying_symbol="NVDA",
+                expiration=expiration,
+                option_type="CALL",
+                strike=220,
+                side="SHORT",
+                quantity=1,
+                average_price=1.61,
+            )
+        ],
+        {
+            "NVDA": {
+                "lastPrice": 200,
+                "lowPrice": 190,
+                "highPrice": 210,
+                "30DayLow": 180,
+                "30DayHigh": 220,
+                "52WeekLow": 100,
+                "52WeekHigh": 300,
+            },
+            "NVDA  260717C00220000": {"mark": 0.66, "delta": 0.10},
+        },
+        AppConfig(),
+    )[0]
+
+    header = _format_monitor_header(width=120)
+    formatted = _format_row(row, width=120)
+
+    assert len(header) == len(formatted)
+    assert header.index("Qty") + len("Qty") == formatted.index("-1") + len("-1")
+    assert header.index("Delta") + len("Delta") == formatted.index("0.10") + len("0.10")
+    assert header.rindex("Day") + 1 == formatted.index("[--|--]") + 3
+    assert len(_format_monitor_header(width=100)) <= 100
 
 
 def test_quote_ranges_accept_nested_fields() -> None:
@@ -889,27 +930,53 @@ def test_monitor_status_shows_total_theta_and_today_pnl_after_open_position_coun
     assert status == "3 open positions | total theta +$7.00/day | today P/L +$5.50 | refreshed 15:30:00"
 
 
-def test_account_value_line_shows_total_value_and_total_day_change() -> None:
+def test_account_value_line_shows_total_value_day_change_and_cash_balance() -> None:
     summary = account_value_summary(
         {
             "securitiesAccount": {
-                "currentBalances": {"liquidationValue": 125_432.10},
+                "currentBalances": {
+                    "cashBalance": 42_100.25,
+                    "liquidationValue": 125_432.10,
+                },
                 "initialBalances": {"accountValue": 124_900.00},
             }
         }
     )
 
-    assert summary == AccountValueSummary(total_value=125_432.10, day_change=532.10)
+    assert summary == AccountValueSummary(
+        total_value=125_432.10,
+        day_change=532.10,
+        cash_balance=42_100.25,
+    )
     assert format_account_value_line(summary) == (
         "Total account value $125,432.10 - Total day change +$532.10"
+        " - Current cash balance $42,100.25"
     )
+
+
+def test_account_value_line_uses_negative_margin_balance_when_cash_is_zero() -> None:
+    summary = account_value_summary(
+        {
+            "securitiesAccount": {
+                "currentBalances": {
+                    "cashBalance": 0,
+                    "marginBalance": -12_345.67,
+                    "liquidationValue": 125_432.10,
+                },
+                "initialBalances": {"accountValue": 124_900.00},
+            }
+        }
+    )
+
+    assert summary.cash_balance == -12_345.67
+    assert format_account_value_line(summary).endswith("Current cash balance -$12,345.67")
 
 
 def test_fake_monitor_snapshot_reuses_account_positions_and_includes_account_value() -> None:
     rows, summary = build_monitor_snapshot(FakeBroker(as_of=date(2026, 7, 1)), AppConfig())
 
     assert len(rows) == 2
-    assert summary == AccountValueSummary(total_value=125_000, day_change=500)
+    assert summary == AccountValueSummary(total_value=125_000, day_change=500, cash_balance=100_000)
 
 
 def test_roll_candidate_list_uses_available_room_for_twelve_rows() -> None:
