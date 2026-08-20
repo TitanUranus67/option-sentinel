@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import CandidateStrangle, OptionContract, TradeBatch
+from .models import CandidateShortOption, CandidateStrangle, OptionContract, TradeBatch
 from .position_import import BrokerOptionPosition
 
 
@@ -63,6 +63,26 @@ def build_open_order(candidate: CandidateStrangle, *, quantity: int, limit_credi
                     "assetType": "OPTION",
                 },
             },
+        ],
+    }
+
+
+def build_open_option_order(candidate: CandidateShortOption, *, quantity: int, limit_credit: float) -> dict:
+    return {
+        "orderType": "LIMIT",
+        "session": "NORMAL",
+        "price": _price(limit_credit),
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "orderLegCollection": [
+            {
+                "instruction": "SELL_TO_OPEN",
+                "quantity": quantity,
+                "instrument": {
+                    "symbol": candidate.option.symbol,
+                    "assetType": "OPTION",
+                },
+            }
         ],
     }
 

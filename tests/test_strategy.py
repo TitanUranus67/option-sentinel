@@ -10,6 +10,7 @@ from option_sentinel.strategy import (
     filter_liquid_contracts,
     find_candidate_strangle,
     find_candidate_strangles,
+    find_candidate_short_options,
     select_closest_delta,
 )
 
@@ -177,3 +178,23 @@ def test_find_candidate_strangles_returns_closest_configured_matches_sorted() ->
     assert [candidate.expiration for candidate in candidates] == [best, far]
     assert candidates[0].put.symbol == "BESTP"
     assert candidates[0].call.symbol == "BESTC"
+
+
+def test_find_candidate_short_options_does_not_require_the_other_leg() -> None:
+    today = date.today()
+    expiration = today + timedelta(days=25)
+    chain = OptionChain(
+        symbol="XYZ",
+        underlying_price=100,
+        contracts=[
+            _contract(symbol="PUT15", option_type="PUT", expiration=expiration, strike=85, delta=-0.15),
+            _contract(symbol="PUT08", option_type="PUT", expiration=expiration, strike=80, delta=-0.08),
+        ],
+    )
+
+    candidates = find_candidate_short_options(chain, AppConfig(), option_type="PUT", as_of=today)
+
+    assert len(candidates) == 1
+    assert candidates[0].option.symbol == "PUT15"
+    assert candidates[0].option_type == "PUT"
+    assert candidates[0].estimated_credit_mid == 1.05

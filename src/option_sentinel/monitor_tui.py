@@ -11,14 +11,14 @@ from typing import Any
 from .broker import Broker
 from .charts import build_intraday_charts, render_intraday_charts
 from .config import AppConfig
-from .models import CandidateStrangle, OrderDraft
+from .models import CandidateShortOption, CandidateStrangle, OrderDraft
 from .order_status import (
     OrderStatusRow,
     broker_order_id_from_response,
     open_closing_order_symbols,
     refresh_order_status_rows,
 )
-from .orders import build_close_option_order, build_open_order, build_roll_option_order
+from .orders import build_close_option_order, build_open_option_order, build_open_order, build_roll_option_order
 from .persistence import Repository
 from .position_monitor import (
     AccountValueSummary,
@@ -41,9 +41,9 @@ from .position_monitor import (
     total_position_theta,
 )
 from .refresh import BrokerRefreshCoordinator
-from .risk import validate_new_trade
+from .risk import validate_new_option_trade, validate_new_trade
 from .roll import RollCandidate, find_credit_roll_candidates
-from .strategy import find_candidate_strangles
+from .strategy import find_candidate_short_options, find_candidate_strangles
 from .trading import OrderOutcomeUnknownError, broker_rejection_message, draft_or_submit_order
 
 ACTION_CLOSE = 0
@@ -57,6 +57,7 @@ COLOR_STOP_LOSS = 1
 COLOR_TAKE_PROFIT = 2
 OPEN_CANDIDATE_LIMIT = 12
 OPEN_QUANTITY = 1
+OPEN_STRATEGIES = ("STRANGLE", "PUT", "CALL")
 ORDER_DRAFT_LIMIT = 100
 FULL_MONITOR_WIDTH = 138
 CHART_BLOCK_HEIGHT = 10
@@ -313,7 +314,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 if refresh.waiting:
                     status = _broker_busy_message(refresh.waiting_kind)
                 else:
-                    status = _open_new_strangle(
+                    status = _open_new_trade(
                         stdscr,
                         config=config,
                         broker=broker,
@@ -1242,7 +1243,7 @@ def _add_menu_item(stdscr: curses.window, y: int, x: int, label: str, width: int
     _add_line(stdscr, y, x, f"{prefix}{label}", width, attr)
 
 
-def _open_new_strangle(
+def _open_new_trade(
     stdscr: curses.window,
     *,
     config: AppConfig,
@@ -1262,23 +1263,27 @@ def _open_new_strangle(
     if symbol is None:
         return "Open cancelled."
 
+    strategy = _select_open_strategy(stdscr)
+    if strategy is None:
+        return "Open cancelled."
+
     try:
-        candidates = _open_candidate_strangles(config=config, broker=broker, symbol=symbol)
+        candidates = _open_candidates(config=config, broker=broker, symbol=symbol, strategy=strategy)
     except Exception as exc:
         _draw_message_box(stdscr, [f"Open lookup failed for {symbol}: {exc}", "Press any key."])
         _wait_for_key(stdscr)
         return f"Open lookup failed for {symbol}: {exc}"
 
     if not candidates:
-        _draw_open_candidates(stdscr, symbol, [], config=config)
+        _draw_open_candidates(stdscr, symbol, [], config=config, strategy=strategy)
         _wait_for_key(stdscr)
-        return f"No short strangle candidates found for {symbol}."
+        return f"No short {strategy.lower()} candidates found for {symbol}."
 
-    candidate = _select_open_candidate(stdscr, symbol, candidates, config=config)
+    candidate = _select_open_candidate(stdscr, symbol, candidates, config=config, strategy=strategy)
     if candidate is None:
         return "Open cancelled."
 
-    status = _open_candidate_strangle_with_confirmation(
+    status = _open_candidate_with_confirmation(
         stdscr,
         candidate,
         config=config,
@@ -1293,7 +1298,9 @@ def _open_new_strangle(
     return status
 
 
-def _open_candidate_strangles(*, config: AppConfig, broker: Broker, symbol: str) -> list[CandidateStrangle]:
+def _open_candidates(
+    *, config: AppConfig, broker: Broker, symbol: str, strategy: str
+) -> list[CandidateStrangle] | list[CandidateShortOption]:
     normalized = symbol.upper()
     today = date.today()
     chain = broker.get_option_chain(
@@ -1302,11 +1309,21 @@ def _open_candidate_strangles(*, config: AppConfig, broker: Broker, symbol: str)
         to_date=today + timedelta(days=config.strategy.dte_max),
     )
     quotes = broker.get_quotes([normalized])
-    return find_candidate_strangles(
+    earnings_date = _earnings_date_from_quotes(quotes, normalized)
+    if strategy == "STRANGLE":
+        return find_candidate_strangles(
+            chain,
+            config,
+            as_of=today,
+            earnings_date=earnings_date,
+            limit=OPEN_CANDIDATE_LIMIT,
+        )
+    return find_candidate_short_options(
         chain,
         config,
+        option_type=strategy,
         as_of=today,
-        earnings_date=_earnings_date_from_quotes(quotes, normalized),
+        earnings_date=earnings_date,
         limit=OPEN_CANDIDATE_LIMIT,
     )
 
@@ -1321,26 +1338,71 @@ def _open_candidate_strangle_with_confirmation(
     quantity: int,
     confirm_func,
 ) -> str:
+    return _open_candidate_with_confirmation(
+        stdscr,
+        candidate,
+        config=config,
+        broker=broker,
+        repository=repository,
+        quantity=quantity,
+        confirm_func=confirm_func,
+    )
+
+
+def _open_candidate_with_confirmation(
+    stdscr: curses.window | None,
+    candidate: CandidateStrangle | CandidateShortOption,
+    *,
+    config: AppConfig,
+    broker: Broker,
+    repository: Repository,
+    quantity: int,
+    confirm_func,
+) -> str:
     try:
         submitted_drafts = repository.list_order_drafts(limit=None, only_today=True)
         refresh_order_status_rows(submitted_drafts, broker, repository)
         positions = broker.get_positions()
-        risk = validate_new_trade(candidate, quantity=quantity, config=config, repository=repository, positions=positions)
+        if isinstance(candidate, CandidateStrangle):
+            risk = validate_new_trade(
+                candidate, quantity=quantity, config=config, repository=repository, positions=positions
+            )
+        else:
+            risk = validate_new_option_trade(
+                candidate, quantity=quantity, config=config, repository=repository, positions=positions
+            )
     except Exception as exc:
         return f"Open not placed: risk check failed: {exc}"
 
     if not risk.allowed:
         return f"Open blocked for {candidate.symbol}: {'; '.join(risk.messages)}"
 
-    order = build_open_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
-    mode_line = "Dry-run: no order will be placed." if config.risk.dry_run else "Live mode: this can submit a real order."
+    if isinstance(candidate, CandidateStrangle):
+        order = build_open_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
+        strategy_label = "short strangle"
+        leg_line = f"Sell put {candidate.put.strike:g} and call {candidate.call.strike:g}"
+        risk_line = f"Assignment capital {risk.assignment_capital:,.0f}  Call covered: {risk.call_covered}"
+    else:
+        order = build_open_option_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
+        strategy_label = f"short {candidate.option_type.lower()}"
+        leg_line = f"Sell {candidate.option_type.lower()} {candidate.strike:g} (delta {candidate.option.delta:.3f})"
+        risk_line = (
+            f"Assignment capital {risk.assignment_capital:,.0f}"
+            if candidate.option_type == "PUT"
+            else f"Call covered: {risk.call_covered}"
+        )
+    mode_line = (
+        "Dry-run: no order will be placed."
+        if config.risk.dry_run
+        else "Live mode: this can submit a real order."
+    )
     confirmed = confirm_func(
         stdscr,
         [
-            f"Open {quantity} {candidate.symbol} short strangle exp {candidate.expiration.isoformat()}",
-            f"Sell put {candidate.put.strike:g} and call {candidate.call.strike:g}",
+            f"Open {quantity} {candidate.symbol} {strategy_label} exp {candidate.expiration.isoformat()}",
+            leg_line,
             f"Limit credit {candidate.estimated_credit_mid:.2f}  Bid credit {candidate.estimated_credit_bid:.2f}",
-            f"Assignment capital {risk.assignment_capital:,.0f}  Call covered: {risk.call_covered}",
+            risk_line,
             mode_line,
             "Submit this limit open order?",
         ],
@@ -1388,6 +1450,56 @@ def _open_position_counts_by_symbol(rows: list[OptionMonitorRow]) -> dict[str, i
         if symbol:
             counts[symbol] = counts.get(symbol, 0) + max(0, row.position.quantity)
     return counts
+
+
+def _select_open_strategy(stdscr: curses.window) -> str | None:
+    selected = 0
+    stdscr.timeout(-1)
+    try:
+        while True:
+            _draw_open_strategy_popup(stdscr, selected_index=selected)
+            key = stdscr.getch()
+            navigation_delta = _navigation_delta(key, page_size=len(OPEN_STRATEGIES))
+            if key in (27, ord("q"), curses.KEY_LEFT):
+                return None
+            if navigation_delta:
+                selected = min(len(OPEN_STRATEGIES) - 1, max(0, selected + navigation_delta))
+            elif key in (10, 13, curses.KEY_ENTER):
+                return OPEN_STRATEGIES[selected]
+    finally:
+        stdscr.timeout(250)
+
+
+def _draw_open_strategy_popup(stdscr: curses.window, *, selected_index: int) -> None:
+    height, width = stdscr.getmaxyx()
+    if height < 9 or width < 34:
+        stdscr.erase()
+        _add_line(stdscr, 0, 0, "Terminal too small for strategy selector.", width)
+        stdscr.refresh()
+        return
+
+    box_width = min(38, width - 4)
+    box_height = 9
+    top = max(0, (height - box_height) // 2)
+    left = max(0, (width - box_width) // 2)
+    horizontal = "-" * (box_width - 2)
+    _add_line(stdscr, top, left, f"+{horizontal}+", box_width)
+    for offset in range(1, box_height - 1):
+        _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
+    _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
+    _add_line(stdscr, top + 1, left + 2, "Sell to open", box_width - 4, curses.A_BOLD)
+    for offset, strategy in enumerate(OPEN_STRATEGIES):
+        label = strategy.title()
+        _add_menu_item(
+            stdscr,
+            top + 3 + offset,
+            left + 2,
+            label,
+            box_width - 4,
+            selected=selected_index == offset,
+        )
+    _add_line(stdscr, top + 7, left + 2, "Enter selects. Esc cancels.", box_width - 4)
+    stdscr.refresh()
 
 
 def _select_stock_symbol(
@@ -1562,7 +1674,14 @@ def _draw_stock_symbol_popup(
     for offset in range(1, box_height - 1):
         _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
     _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
-    _add_line(stdscr, top + 1, left + 2, "Open new short strangle", box_width - 4, curses.A_BOLD)
+    _add_line(
+        stdscr,
+        top + 1,
+        left + 2,
+        "Sell to open - select stock",
+        box_width - 4,
+        curses.A_BOLD,
+    )
     header = f"{'Select stock':<12} {'IV':>7} {'Open':>6}"
     _add_line(stdscr, top + 2, left + 2, header, box_width - 4)
 
@@ -1629,10 +1748,11 @@ def _format_symbol_iv(
 def _select_open_candidate(
     stdscr: curses.window,
     symbol: str,
-    candidates: list[CandidateStrangle],
+    candidates: list[CandidateStrangle] | list[CandidateShortOption],
     *,
     config: AppConfig,
-) -> CandidateStrangle | None:
+    strategy: str = "STRANGLE",
+) -> CandidateStrangle | CandidateShortOption | None:
     selected = 0
     scroll = 0
     stdscr.timeout(-1)
@@ -1640,7 +1760,15 @@ def _select_open_candidate(
         while True:
             visible_rows = _open_visible_row_count(*stdscr.getmaxyx(), candidate_count=len(candidates))
             if visible_rows <= 0:
-                _draw_open_candidates(stdscr, symbol, candidates, config=config, selected_index=selected, scroll=scroll)
+                _draw_open_candidates(
+                    stdscr,
+                    symbol,
+                    candidates,
+                    config=config,
+                    strategy=strategy,
+                    selected_index=selected,
+                    scroll=scroll,
+                )
                 stdscr.getch()
                 return None
             if selected < scroll:
@@ -1648,7 +1776,9 @@ def _select_open_candidate(
             if selected >= scroll + visible_rows:
                 scroll = selected - visible_rows + 1
 
-            _draw_open_candidates(stdscr, symbol, candidates, config=config, selected_index=selected, scroll=scroll)
+            _draw_open_candidates(
+                stdscr, symbol, candidates, config=config, strategy=strategy, selected_index=selected, scroll=scroll
+            )
             key = stdscr.getch()
             navigation_delta = _navigation_delta(key, page_size=visible_rows)
             if key in (27, ord("q"), curses.KEY_LEFT):
@@ -1671,16 +1801,17 @@ def _open_visible_row_count(height: int, width: int, *, candidate_count: int) ->
 def _draw_open_candidates(
     stdscr: curses.window,
     symbol: str,
-    candidates: list[CandidateStrangle],
+    candidates: list[CandidateStrangle] | list[CandidateShortOption],
     *,
     config: AppConfig,
+    strategy: str = "STRANGLE",
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
     height, width = stdscr.getmaxyx()
     if height < 8 or width < 48:
         stdscr.erase()
-        _add_line(stdscr, 0, 0, "Terminal too small for strangle candidates.", width)
+        _add_line(stdscr, 0, 0, f"Terminal too small for {strategy.lower()} candidates.", width)
         _add_line(stdscr, 1, 0, "Press any key to return.", width)
         stdscr.refresh()
         return
@@ -1694,37 +1825,75 @@ def _draw_open_candidates(
     for offset in range(1, box_height - 1):
         _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
     _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
-    _add_line(stdscr, top + 1, left + 2, f"Short strangle candidates for {symbol.upper()}", box_width - 4, curses.A_BOLD)
+    _add_line(
+        stdscr,
+        top + 1,
+        left + 2,
+        f"Short {strategy.lower()} candidates for {symbol.upper()}",
+        box_width - 4,
+        curses.A_BOLD,
+    )
+    target_delta = config.strategy.put_delta if strategy == "PUT" else config.strategy.call_delta
+    delta_targets = (
+        f"put delta {config.strategy.put_delta:.2f}, call delta {config.strategy.call_delta:.2f}"
+        if strategy == "STRANGLE"
+        else f"{strategy.lower()} delta {target_delta:.2f}"
+    )
     _add_line(
         stdscr,
         top + 2,
         left + 2,
         (
             f"Closest to {config.strategy.dte_min}-{config.strategy.dte_max} DTE, "
-            f"put delta {config.strategy.put_delta:.2f}, call delta {config.strategy.call_delta:.2f}"
+            + delta_targets
         ),
         box_width - 4,
     )
 
-    visible_candidates: list[CandidateStrangle] = []
+    visible_candidates: list[CandidateStrangle] | list[CandidateShortOption] = []
     if not candidates:
-        _add_line(stdscr, top + 4, left + 2, "No matching short strangles found.", box_width - 4, curses.A_BOLD)
+        _add_line(
+            stdscr,
+            top + 4,
+            left + 2,
+            f"No matching short {strategy.lower()} candidates found.",
+            box_width - 4,
+            curses.A_BOLD,
+        )
     else:
-        header = f"{'Exp':<10} {'DTE':>4} {'Put':>8} {'PDel':>7} {'Call':>8} {'CDel':>7} {'BidCr':>7} {'MidCr':>7}"
+        if strategy == "STRANGLE":
+            header = f"{'Exp':<10} {'DTE':>4} {'Put':>8} {'PDel':>7} {'Call':>8} {'CDel':>7} {'BidCr':>7} {'MidCr':>7}"
+        else:
+            header = (
+                f"{'Exp':<10} {'DTE':>4} {'Type':>6} {'Strike':>9} "
+                f"{'Delta':>8} {'Bid':>8} {'Ask':>8} {'MidCr':>8}"
+            )
         _add_line(stdscr, top + 4, left + 2, header, box_width - 4, curses.A_UNDERLINE)
         max_rows = max(0, box_height - 7)
         visible_candidates = candidates[scroll : scroll + max_rows]
         for offset, candidate in enumerate(visible_candidates):
-            line = (
-                f"{candidate.expiration.isoformat():<10} "
-                f"{candidate.dte:>4} "
-                f"{candidate.put.strike:>8g} "
-                f"{candidate.put.delta:>7.3f} "
-                f"{candidate.call.strike:>8g} "
-                f"{candidate.call.delta:>7.3f} "
-                f"{candidate.estimated_credit_bid:>7.2f} "
-                f"{candidate.estimated_credit_mid:>7.2f}"
-            )
+            if isinstance(candidate, CandidateStrangle):
+                line = (
+                    f"{candidate.expiration.isoformat():<10} "
+                    f"{candidate.dte:>4} "
+                    f"{candidate.put.strike:>8g} "
+                    f"{candidate.put.delta:>7.3f} "
+                    f"{candidate.call.strike:>8g} "
+                    f"{candidate.call.delta:>7.3f} "
+                    f"{candidate.estimated_credit_bid:>7.2f} "
+                    f"{candidate.estimated_credit_mid:>7.2f}"
+                )
+            else:
+                line = (
+                    f"{candidate.expiration.isoformat():<10} "
+                    f"{candidate.dte:>4} "
+                    f"{candidate.option_type:>6} "
+                    f"{candidate.strike:>9g} "
+                    f"{candidate.option.delta:>8.3f} "
+                    f"{candidate.option.bid:>8.2f} "
+                    f"{candidate.option.ask:>8.2f} "
+                    f"{candidate.estimated_credit_mid:>8.2f}"
+                )
             attr = curses.A_REVERSE if selected_index == scroll + offset else curses.A_NORMAL
             _add_line(stdscr, top + 5 + offset, left + 2, line, box_width - 4, attr)
 

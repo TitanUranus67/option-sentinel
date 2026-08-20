@@ -3,11 +3,12 @@ from __future__ import annotations
 import curses
 from datetime import date, datetime, timedelta, timezone
 
+import option_sentinel.monitor_tui as monitor_tui
 from option_sentinel.config import AppConfig
 from option_sentinel.brokers.fake_broker import FakeBroker
 from option_sentinel.brokers.schwab_broker import SchwabBroker
 from option_sentinel.charts import build_intraday_charts, render_intraday_chart
-from option_sentinel.models import CandidateStrangle, OptionContract, OrderDraft
+from option_sentinel.models import CandidateShortOption, CandidateStrangle, OptionContract, OrderDraft
 from option_sentinel.monitor_tui import (
     _adjust_order_price_with_confirmation,
     _chart_interval_for_width,
@@ -21,6 +22,7 @@ from option_sentinel.monitor_tui import (
     _monitor_row_attr,
     _navigation_delta,
     _open_position_counts_by_symbol,
+    _open_candidate_with_confirmation,
     _open_candidate_strangle_with_confirmation,
     _order_legs_summary,
     _order_mid_price,
@@ -28,6 +30,7 @@ from option_sentinel.monitor_tui import (
     _roll_selected_option_with_confirmation,
     _roll_visible_row_count,
     _select_stock_symbol,
+    _select_open_strategy,
     _stock_symbol_visible_row_count,
     _draw_broker_spinner,
     _wrap_message_lines,
@@ -148,6 +151,60 @@ def test_navigation_delta_supports_arrows_pages_and_mouse_wheel(monkeypatch) -> 
 
     monkeypatch.setattr(curses, "getmouse", lambda: (0, 0, 0, 0, curses.BUTTON5_PRESSED))
     assert _navigation_delta(curses.KEY_MOUSE, page_size=12) == 1
+
+
+def test_sell_to_open_strategy_selector_offers_put_after_strangle() -> None:
+    class Window:
+        def __init__(self) -> None:
+            self.keys = iter((curses.KEY_DOWN, 10))
+            self.timeouts: list[int] = []
+
+        def getmaxyx(self) -> tuple[int, int]:
+            return 24, 100
+
+        def addnstr(self, *_args) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+        def timeout(self, value: int) -> None:
+            self.timeouts.append(value)
+
+        def getch(self) -> int:
+            return next(self.keys)
+
+    window = Window()
+
+    assert _select_open_strategy(window) == "PUT"  # type: ignore[arg-type]
+    assert window.timeouts == [-1, 250]
+
+
+def test_sell_to_open_selects_stock_before_strategy(tmp_path, monkeypatch) -> None:
+    events: list[str] = []
+
+    def select_stock(*_args, **_kwargs) -> str:
+        events.append("stock")
+        return "NVDA"
+
+    def select_strategy(*_args, **_kwargs) -> None:
+        events.append("strategy")
+        return None
+
+    monkeypatch.setattr(monitor_tui, "_select_stock_symbol", select_stock)
+    monkeypatch.setattr(monitor_tui, "_select_open_strategy", select_strategy)
+
+    status = monitor_tui._open_new_trade(
+        None,  # type: ignore[arg-type]
+        config=AppConfig(),
+        broker=FakeBroker(),
+        repository=Repository(tmp_path / "open.db"),
+        refresh=None,  # type: ignore[arg-type]
+        open_position_counts={},
+    )
+
+    assert status == "Open cancelled."
+    assert events == ["stock", "strategy"]
 
 
 def test_parse_broker_option_positions_sorts_lowest_dte_first() -> None:
@@ -1781,3 +1838,47 @@ def test_tui_open_cancel_stops_before_order(tmp_path) -> None:
 
     assert status == "Open cancelled."
     assert broker.placed_orders == []
+
+
+def test_tui_open_single_put_submits_sell_to_open_limit_order(tmp_path) -> None:
+    config = AppConfig()
+    config.risk.dry_run = False
+    broker = FakeBroker()
+    repository = Repository(tmp_path / "open.db")
+    strangle = _open_candidate()
+    candidate = CandidateShortOption(
+        symbol=strangle.symbol,
+        expiration=strangle.expiration,
+        dte=strangle.dte,
+        option=strangle.put,
+        estimated_credit_bid=strangle.put.bid,
+        estimated_credit_mid=strangle.put.mid,
+    )
+
+    status = _open_candidate_with_confirmation(
+        None,
+        candidate,
+        config=config,
+        broker=broker,
+        repository=repository,
+        quantity=1,
+        confirm_func=lambda _stdscr, _lines: True,
+    )
+
+    assert "submitted" in status
+    assert broker.placed_orders == [
+        {
+            "orderType": "LIMIT",
+            "session": "NORMAL",
+            "price": "1.11",
+            "duration": "DAY",
+            "orderStrategyType": "SINGLE",
+            "orderLegCollection": [
+                {
+                    "instruction": "SELL_TO_OPEN",
+                    "quantity": 1,
+                    "instrument": {"symbol": "NVDA_260725P95", "assetType": "OPTION"},
+                }
+            ],
+        }
+    ]

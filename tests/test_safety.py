@@ -10,12 +10,27 @@ import pytest
 
 from option_sentinel.brokers.fake_broker import FakeBroker
 from option_sentinel.config import AppConfig
-from option_sentinel.confirmation import close_confirmation_phrase, close_option_confirmation_phrase, open_confirmation_phrase
-from option_sentinel.models import CandidateStrangle, OptionContract, OrderDraft, TradeBatch
-from option_sentinel.orders import build_close_option_order, build_close_order, build_open_order, build_roll_option_order
+from option_sentinel.confirmation import (
+    close_confirmation_phrase,
+    close_option_confirmation_phrase,
+    open_confirmation_phrase,
+)
+from option_sentinel.models import CandidateShortOption, CandidateStrangle, OptionContract, OrderDraft, TradeBatch
+from option_sentinel.orders import (
+    build_close_option_order,
+    build_close_order,
+    build_open_option_order,
+    build_open_order,
+    build_roll_option_order,
+)
 from option_sentinel.persistence import Repository
 from option_sentinel.position_import import BrokerOptionPosition
-from option_sentinel.risk import pending_open_option_position_count, submitted_open_order_count, validate_new_trade
+from option_sentinel.risk import (
+    pending_open_option_position_count,
+    submitted_open_order_count,
+    validate_new_option_trade,
+    validate_new_trade,
+)
 from option_sentinel.trading import OrderOutcomeUnknownError, draft_or_submit_order
 
 
@@ -49,6 +64,29 @@ def _candidate() -> CandidateStrangle:
         call=call,
         estimated_credit_bid=2.0,
         estimated_credit_mid=2.1,
+    )
+
+
+def _single_candidate(option_type: str = "PUT") -> CandidateShortOption:
+    expiration = date.today() + timedelta(days=25)
+    is_put = option_type == "PUT"
+    option = OptionContract(
+        symbol="XYZP" if is_put else "XYZC",
+        underlying_symbol="XYZ",
+        expiration=expiration,
+        option_type=option_type,  # type: ignore[arg-type]
+        strike=80 if is_put else 120,
+        delta=-0.16 if is_put else 0.10,
+        bid=1.0,
+        ask=1.1,
+    )
+    return CandidateShortOption(
+        symbol="XYZ",
+        expiration=expiration,
+        dte=25,
+        option=option,
+        estimated_credit_bid=1.0,
+        estimated_credit_mid=1.05,
     )
 
 
@@ -153,6 +191,57 @@ def test_build_open_order_uses_net_credit_strangle_shape() -> None:
     assert order["orderLegCollection"][1]["instruction"] == "SELL_TO_OPEN"
     assert order["orderLegCollection"][1]["quantity"] == 2
     assert order["orderLegCollection"][1]["instrument"]["symbol"] == "XYZC"
+
+
+def test_build_open_option_order_uses_single_leg_limit_sell_to_open() -> None:
+    order = build_open_option_order(_single_candidate("PUT"), quantity=2, limit_credit=1.05)
+
+    assert order["orderType"] == "LIMIT"
+    assert order["price"] == "1.05"
+    assert "complexOrderStrategyType" not in order
+    assert order["orderLegCollection"] == [
+        {
+            "instruction": "SELL_TO_OPEN",
+            "quantity": 2,
+            "instrument": {"symbol": "XYZP", "assetType": "OPTION"},
+        }
+    ]
+
+
+def test_single_put_risk_uses_one_position_and_does_not_require_call_coverage(tmp_path) -> None:
+    repository = Repository(tmp_path / "risk.db")
+    config = AppConfig()
+    config.risk.max_option_positions = 0
+
+    risk = validate_new_option_trade(
+        _single_candidate("PUT"),
+        quantity=1,
+        config=config,
+        repository=repository,
+        positions=[],
+    )
+
+    assert risk.assignment_capital == 8_000
+    assert risk.messages == ["max_option_positions would be exceeded (live: 0, new: 1, total: 1, limit: 0)"]
+
+
+def test_single_call_risk_enforces_naked_call_setting_without_put_assignment_capital(tmp_path) -> None:
+    repository = Repository(tmp_path / "risk.db")
+    config = AppConfig()
+
+    risk = validate_new_option_trade(
+        _single_candidate("CALL"),
+        quantity=1,
+        config=config,
+        repository=repository,
+        positions=[],
+    )
+
+    assert risk.assignment_capital == 0
+    assert risk.allowed is False
+    assert risk.messages == [
+        "call leg is not covered and allow_naked_calls is false (shares: 0, reserved: 0, available: 0, needed: 100)"
+    ]
 
 
 def test_dry_run_prevents_order_submission(tmp_path) -> None:

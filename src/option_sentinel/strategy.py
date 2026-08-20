@@ -5,7 +5,15 @@ from datetime import date, datetime
 from typing import Iterable
 
 from .config import AppConfig, StrategyConfig
-from .models import AlertState, CandidateStrangle, OptionChain, OptionContract, TradeBatch, TradeSnapshot
+from .models import (
+    AlertState,
+    CandidateShortOption,
+    CandidateStrangle,
+    OptionChain,
+    OptionContract,
+    TradeBatch,
+    TradeSnapshot,
+)
 
 
 def days_to_expiration(expiration: date, *, as_of: date | None = None) -> int:
@@ -125,6 +133,72 @@ def find_candidate_strangles(
             abs(candidate.dte - target_dte),
             abs(abs(candidate.put.delta) - config.strategy.put_delta)
             + abs(abs(candidate.call.delta) - config.strategy.call_delta),
+            candidate.expiration,
+            -candidate.estimated_credit_mid,
+        )
+    )
+    if limit is not None:
+        return candidates[:limit]
+    return candidates
+
+
+def find_candidate_short_options(
+    chain: OptionChain,
+    config: AppConfig,
+    *,
+    option_type: str,
+    as_of: date | None = None,
+    earnings_date: date | None = None,
+    limit: int | None = None,
+) -> list[CandidateShortOption]:
+    normalized_type = option_type.strip().upper()
+    if normalized_type not in {"PUT", "CALL"}:
+        raise ValueError("option_type must be PUT or CALL")
+
+    current = as_of or date.today()
+    liquid_contracts = filter_liquid_contracts(chain.contracts, config.risk.max_bid_ask_spread_pct)
+    expirations: dict[date, list[OptionContract]] = defaultdict(list)
+    for contract in liquid_contracts:
+        dte = days_to_expiration(contract.expiration, as_of=current)
+        if contract.option_type == normalized_type and config.strategy.dte_min <= dte <= config.strategy.dte_max:
+            expirations[contract.expiration].append(contract)
+
+    target_delta = config.strategy.put_delta if normalized_type == "PUT" else config.strategy.call_delta
+    target_dte = (config.strategy.dte_min + config.strategy.dte_max) / 2
+    candidates: list[CandidateShortOption] = []
+    for expiration, contracts in expirations.items():
+        contract = select_closest_delta(
+            contracts,
+            option_type=normalized_type,
+            target_delta=target_delta,
+            expiration=expiration,
+        )
+        dte = days_to_expiration(expiration, as_of=current)
+        earnings_within_window = earnings_date is not None and current <= earnings_date <= expiration
+        notes: list[str] = []
+        if earnings_within_window:
+            notes.append("Earnings before expiration")
+        if normalized_type == "PUT" and contract.delta >= 0:
+            notes.append("Put delta is non-negative; verify option chain data")
+        if normalized_type == "CALL" and contract.delta <= 0:
+            notes.append("Call delta is non-positive; verify option chain data")
+        candidates.append(
+            CandidateShortOption(
+                symbol=chain.symbol.upper(),
+                expiration=expiration,
+                dte=dte,
+                option=contract,
+                estimated_credit_bid=round(contract.bid, 4),
+                estimated_credit_mid=round(contract.mid, 4),
+                notes=notes,
+                earnings_within_window=earnings_within_window,
+            )
+        )
+
+    candidates.sort(
+        key=lambda candidate: (
+            abs(candidate.dte - target_dte),
+            abs(abs(candidate.option.delta) - target_delta),
             candidate.expiration,
             -candidate.estimated_credit_mid,
         )

@@ -69,6 +69,25 @@ class CandidateStrangle(BaseModel):
         return self.call.strike
 
 
+class CandidateShortOption(BaseModel):
+    symbol: str
+    expiration: date
+    dte: int
+    option: OptionContract
+    estimated_credit_bid: float
+    estimated_credit_mid: float
+    notes: list[str] = Field(default_factory=list)
+    earnings_within_window: bool = False
+
+    @property
+    def option_type(self) -> Literal["PUT", "CALL"]:
+        return self.option.option_type
+
+    @property
+    def strike(self) -> float:
+        return self.option.strike
+
+
 class TradeBatch(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
