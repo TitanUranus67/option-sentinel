@@ -23,9 +23,11 @@ from .persistence import Repository
 from .position_monitor import (
     AccountValueSummary,
     OptionMonitorRow,
+    account_value_summary,
     apply_closing_order_flags,
     build_monitor_rows,
     build_monitor_snapshot,
+    first_float,
     format_account_value_line,
     format_closing_order_flag,
     format_optional_delta,
@@ -39,6 +41,7 @@ from .position_monitor import (
     mark_from_quote,
     total_today_pnl,
     total_position_theta,
+    underlying_price_from_quote,
 )
 from .refresh import BrokerRefreshCoordinator
 from .risk import validate_new_option_trade, validate_new_trade
@@ -1252,6 +1255,14 @@ def _open_new_trade(
     refresh: BrokerRefreshCoordinator,
     open_position_counts: dict[str, int],
 ) -> str:
+    try:
+        share_account_percentages = _share_account_percentages(broker, config.symbols)
+    except Exception as exc:
+        status = f"Open lookup failed: share allocation unavailable: {exc}"
+        _draw_message_box(stdscr, [status, "Press any key."])
+        _wait_for_key(stdscr)
+        return status
+
     symbol = _select_stock_symbol(
         stdscr,
         config.symbols,
@@ -1259,6 +1270,7 @@ def _open_new_trade(
         broker=broker,
         refresh=refresh,
         open_position_counts=open_position_counts,
+        share_account_percentages=share_account_percentages,
     )
     if symbol is None:
         return "Open cancelled."
@@ -1452,6 +1464,57 @@ def _open_position_counts_by_symbol(rows: list[OptionMonitorRow]) -> dict[str, i
     return counts
 
 
+def _share_account_percentages(broker: Broker, symbols: list[str]) -> dict[str, float | None]:
+    choices = _configured_stock_symbols(symbols)
+    account = broker.get_account()
+    total_value = account_value_summary(account).total_value
+    if total_value is None or total_value <= 0:
+        return {symbol: None for symbol in choices}
+
+    securities_account = account.get("securitiesAccount", account)
+    raw_positions = securities_account.get("positions") if isinstance(securities_account, dict) else None
+    positions = raw_positions if isinstance(raw_positions, list) else broker.get_positions()
+    share_quantities: dict[str, float] = {}
+    market_values: dict[str, float] = {}
+    symbols_needing_quotes: set[str] = set()
+    wanted = set(choices)
+
+    for position in positions:
+        instrument = position.get("instrument") or {}
+        asset_type = str(instrument.get("assetType") or position.get("assetType") or "").upper()
+        symbol = str(instrument.get("symbol") or position.get("symbol") or "").strip().upper()
+        if asset_type != "EQUITY" or symbol not in wanted:
+            continue
+        shares = first_float(position.get("longQuantity"), position.get("long_quantity")) or 0.0
+        if shares <= 0:
+            continue
+        share_quantities[symbol] = share_quantities.get(symbol, 0.0) + shares
+        market_value = first_float(position.get("marketValue"), position.get("market_value"))
+        if market_value is None:
+            symbols_needing_quotes.add(symbol)
+        else:
+            market_values[symbol] = market_values.get(symbol, 0.0) + market_value
+
+    if symbols_needing_quotes:
+        quotes = broker.get_quotes(sorted(symbols_needing_quotes))
+        for symbol in symbols_needing_quotes:
+            price = underlying_price_from_quote(quotes, symbol)
+            if price is not None:
+                market_values[symbol] = share_quantities[symbol] * price
+            else:
+                market_values.pop(symbol, None)
+
+    percentages: dict[str, float | None] = {}
+    for symbol in choices:
+        if symbol not in share_quantities:
+            percentages[symbol] = 0.0
+        elif symbol not in market_values:
+            percentages[symbol] = None
+        else:
+            percentages[symbol] = round(market_values[symbol] / total_value * 100, 4)
+    return percentages
+
+
 def _select_open_strategy(stdscr: curses.window) -> str | None:
     selected = 0
     stdscr.timeout(-1)
@@ -1510,6 +1573,7 @@ def _select_stock_symbol(
     broker: Broker,
     refresh: BrokerRefreshCoordinator,
     open_position_counts: dict[str, int] | None = None,
+    share_account_percentages: dict[str, float | None] | None = None,
 ) -> str | None:
     choices = _configured_stock_symbols(symbols)
     if not choices:
@@ -1574,6 +1638,7 @@ def _select_stock_symbol(
                     implied_volatilities=implied_volatilities,
                     implied_volatility_errors=implied_volatility_errors,
                     open_position_counts=open_position_counts,
+                    share_account_percentages=share_account_percentages,
                     selected_index=selected,
                     scroll=scroll,
                 )
@@ -1590,6 +1655,7 @@ def _select_stock_symbol(
                 implied_volatilities=implied_volatilities,
                 implied_volatility_errors=implied_volatility_errors,
                 open_position_counts=open_position_counts,
+                share_account_percentages=share_account_percentages,
                 selected_index=selected,
                 scroll=scroll,
             )
@@ -1652,6 +1718,7 @@ def _draw_stock_symbol_popup(
     implied_volatilities: dict[str, float | None] | None = None,
     implied_volatility_errors: dict[str, str] | None = None,
     open_position_counts: dict[str, int] | None = None,
+    share_account_percentages: dict[str, float | None] | None = None,
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
@@ -1665,7 +1732,7 @@ def _draw_stock_symbol_popup(
 
     longest_symbol = max((len(symbol) for symbol in symbols), default=0)
     longest_error = max((len(message) for message in (implied_volatility_errors or {}).values()), default=0)
-    box_width = min(max(38, longest_symbol + 18, longest_error + 4), max(34, width - 4))
+    box_width = min(max(42, longest_symbol + 30, longest_error + 4), max(34, width - 4))
     box_height = min(max(8, len(symbols) + 5), height - 2)
     top = max(0, (height - box_height) // 2)
     left = max(0, (width - box_width) // 2)
@@ -1682,7 +1749,7 @@ def _draw_stock_symbol_popup(
         box_width - 4,
         curses.A_BOLD,
     )
-    header = f"{'Select stock':<12} {'IV':>7} {'Open':>6}"
+    header = f"{'Select stock':<12} {'IV':>7} {'Open':>6} {'Shares %':>8}"
     _add_line(stdscr, top + 2, left + 2, header, box_width - 4)
 
     visible_symbols: list[str] = []
@@ -1696,6 +1763,7 @@ def _draw_stock_symbol_popup(
             iv = implied_volatilities.get(symbol) if iv_loaded and implied_volatilities is not None else None
             iv_failed = implied_volatility_errors is not None and symbol in implied_volatility_errors
             open_positions = (open_position_counts or {}).get(symbol, 0)
+            share_account_percentage = (share_account_percentages or {}).get(symbol)
             _add_menu_item(
                 stdscr,
                 top + 3 + offset,
@@ -1706,6 +1774,7 @@ def _draw_stock_symbol_popup(
                     loaded=iv_loaded,
                     failed=iv_failed,
                     open_positions=open_positions,
+                    share_account_percentage=share_account_percentage,
                 ),
                 box_width - 4,
                 selected=selected_index == scroll + offset,
@@ -1733,6 +1802,7 @@ def _format_symbol_iv(
     loaded: bool,
     failed: bool = False,
     open_positions: int = 0,
+    share_account_percentage: float | None = None,
 ) -> str:
     if not loaded:
         iv = "..."
@@ -1742,7 +1812,8 @@ def _format_symbol_iv(
         iv = "-"
     else:
         iv = f"{implied_volatility:.1f}%"
-    return f"{symbol:<12} {iv:>7} {open_positions:>6}"
+    shares_pct = "-" if share_account_percentage is None else f"{share_account_percentage:.1f}%"
+    return f"{symbol:<12} {iv:>7} {open_positions:>6} {shares_pct:>8}"
 
 
 def _select_open_candidate(

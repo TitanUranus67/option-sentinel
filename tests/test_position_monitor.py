@@ -29,6 +29,7 @@ from option_sentinel.monitor_tui import (
     _price_prompt_field,
     _roll_selected_option_with_confirmation,
     _roll_visible_row_count,
+    _share_account_percentages,
     _select_stock_symbol,
     _select_open_strategy,
     _stock_symbol_visible_row_count,
@@ -182,9 +183,11 @@ def test_sell_to_open_strategy_selector_offers_put_after_strangle() -> None:
 
 def test_sell_to_open_selects_stock_before_strategy(tmp_path, monkeypatch) -> None:
     events: list[str] = []
+    displayed_share_percentages: dict[str, float | None] = {}
 
     def select_stock(*_args, **_kwargs) -> str:
         events.append("stock")
+        displayed_share_percentages.update(_kwargs["share_account_percentages"])
         return "NVDA"
 
     def select_strategy(*_args, **_kwargs) -> None:
@@ -205,6 +208,12 @@ def test_sell_to_open_selects_stock_before_strategy(tmp_path, monkeypatch) -> No
 
     assert status == "Open cancelled."
     assert events == ["stock", "strategy"]
+    assert displayed_share_percentages == {
+        "TSLA": 0.0,
+        "NVDA": 20.0,
+        "INTC": 2.8,
+        "RKLB": 0.0,
+    }
 
 
 def test_parse_broker_option_positions_sorts_lowest_dte_first() -> None:
@@ -1046,10 +1055,71 @@ def test_open_stock_selector_uses_configured_symbols_without_duplicates() -> Non
 
 
 def test_symbol_iv_format_shows_loading_missing_and_percentage() -> None:
-    assert _format_symbol_iv("NVDA", None, loaded=False).strip() == "NVDA             ...      0"
-    assert _format_symbol_iv("NVDA", None, loaded=True).strip() == "NVDA               -      0"
-    assert _format_symbol_iv("NVDA", None, loaded=True, failed=True).strip() == "NVDA             ERR      0"
-    assert _format_symbol_iv("NVDA", 29.44, loaded=True, open_positions=4).strip() == "NVDA           29.4%      4"
+    assert _format_symbol_iv("NVDA", None, loaded=False).strip() == "NVDA             ...      0        -"
+    assert _format_symbol_iv("NVDA", None, loaded=True).strip() == "NVDA               -      0        -"
+    assert _format_symbol_iv("NVDA", None, loaded=True, failed=True).strip() == "NVDA             ERR      0        -"
+    assert (
+        _format_symbol_iv(
+            "NVDA",
+            29.44,
+            loaded=True,
+            open_positions=4,
+            share_account_percentage=20.0,
+        ).strip()
+        == "NVDA           29.4%      4    20.0%"
+    )
+
+
+def test_share_account_percentages_use_only_equity_share_market_value() -> None:
+    class Broker:
+        def get_account(self) -> dict:
+            return {
+                "securitiesAccount": {
+                    "currentBalances": {"liquidationValue": 100_000},
+                    "positions": [
+                        {
+                            "instrument": {"assetType": "EQUITY", "symbol": "NVDA"},
+                            "longQuantity": 200,
+                            "marketValue": 25_000,
+                        },
+                        {
+                            "instrument": {"assetType": "OPTION", "symbol": "NVDA CALL"},
+                            "longQuantity": 5,
+                            "marketValue": 2_000,
+                        },
+                    ],
+                }
+            }
+
+        def get_quotes(self, symbols: list[str]) -> dict:
+            raise AssertionError(f"market values should avoid a quote lookup: {symbols}")
+
+    assert _share_account_percentages(Broker(), ["NVDA", "TSLA"]) == {  # type: ignore[arg-type]
+        "NVDA": 25.0,
+        "TSLA": 0.0,
+    }
+
+
+def test_share_account_percentages_fall_back_to_shares_times_live_price() -> None:
+    class Broker:
+        def get_account(self) -> dict:
+            return {
+                "securitiesAccount": {
+                    "currentBalances": {"liquidationValue": 50_000},
+                    "positions": [
+                        {
+                            "instrument": {"assetType": "EQUITY", "symbol": "RKLB"},
+                            "longQuantity": 100,
+                        }
+                    ],
+                }
+            }
+
+        def get_quotes(self, symbols: list[str]) -> dict:
+            assert symbols == ["RKLB"]
+            return {"RKLB": {"lastPrice": 10}}
+
+    assert _share_account_percentages(Broker(), ["RKLB"]) == {"RKLB": 2.0}  # type: ignore[arg-type]
 
 
 def test_open_position_counts_sum_contract_quantity_by_underlying() -> None:
