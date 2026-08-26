@@ -8,8 +8,10 @@ from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.columns import Columns
 from rich.json import JSON
 from rich.table import Table
+from rich.text import Text
 
 from .broker import Broker
 from .brokers import FakeBroker, SchwabBroker
@@ -23,9 +25,10 @@ from .persistence import Repository
 from .position_monitor import (
     apply_closing_order_flags,
     build_monitor_snapshot,
+    configured_symbol_market_data,
     format_account_value_line,
     format_closing_order_flag,
-    format_optional_delta,
+    format_net_option_delta,
     format_optional_percent,
     format_optional_price,
     format_optional_signed_percent,
@@ -33,6 +36,7 @@ from .position_monitor import (
     format_range_meter,
     format_today_pnl,
     format_total_theta,
+    net_option_deltas_by_symbol,
     total_today_pnl,
     total_position_theta,
 )
@@ -388,7 +392,7 @@ def monitor(
         run_monitor_tui(config=config, broker=broker, repository=repository)
         return
 
-    def render() -> Table:
+    def render() -> Columns:
         rows, account_summary = build_monitor_snapshot(broker, config)
         order_drafts = repository.list_order_drafts(only_today=True)
         order_rows, _ = refresh_order_status_rows(order_drafts, broker, repository)
@@ -402,45 +406,63 @@ def monitor(
             )
         )
         table.add_column("Symbol")
-        table.add_column("Price", justify="right")
         table.add_column("Option")
         table.add_column("Qty", justify="right")
         table.add_column("DTE", justify="right")
-        table.add_column("Delta", justify="right")
         table.add_column("Mid", justify="right")
         table.add_column("POP", justify="right")
         table.add_column("P/L Day %", justify="right")
         table.add_column("P/L %", justify="right")
         table.add_column("Day", justify="right")
         table.add_column("30D", justify="right")
-        table.add_column("52W", justify="right")
         table.add_column("Alert")
-        table.add_column("Closing")
+        table.add_column("Cls")
 
         if not rows:
-            table.add_row("-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "No option positions", "-")
-            return table
+            table.add_row("-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "No option positions", "-")
+        else:
+            for row in rows:
+                position = row.position
+                table.add_row(
+                    position.underlying_symbol,
+                    f"{position.option_type[0]} {position.strike:g}",
+                    format_position_quantity(position),
+                    str(row.dte),
+                    format_optional_price(row.mark),
+                    format_optional_percent(row.pop),
+                    format_optional_signed_percent(row.day_pnl_pct),
+                    format_optional_signed_percent(row.pnl_pct),
+                    format_range_meter(row.day_range),
+                    format_range_meter(row.day30_range),
+                    row.display_alert,
+                    format_closing_order_flag(row.has_closing_order),
+                )
 
-        for row in rows:
-            position = row.position
-            table.add_row(
-                position.underlying_symbol,
-                format_optional_price(row.underlying_price),
-                f"{position.option_type[0]} {position.strike:g}",
-                format_position_quantity(position),
-                str(row.dte),
-                format_optional_delta(row.delta),
-                format_optional_price(row.mark),
-                format_optional_percent(row.pop),
-                format_optional_signed_percent(row.day_pnl_pct),
-                format_optional_signed_percent(row.pnl_pct),
-                format_range_meter(row.day_range),
-                format_range_meter(row.day30_range),
-                format_range_meter(row.week52_range),
-                row.display_alert,
-                format_closing_order_flag(row.has_closing_order),
+        delta_table = Table(title="Symbols")
+        delta_table.add_column("Symbol")
+        delta_table.add_column("Price", justify="right")
+        delta_table.add_column("Net Δ", justify="right")
+        delta_table.add_column("Today", justify="right")
+        market_data = configured_symbol_market_data(broker, config.symbols)
+        for symbol, delta in net_option_deltas_by_symbol(rows, config.symbols).items():
+            rounded = round(delta, 1) if delta is not None else 0.0
+            style = "green" if rounded > 0 else "red" if rounded < 0 else None
+            symbol_data = market_data.get(symbol)
+            today_change = symbol_data.today_change if symbol_data is not None else None
+            today_style = (
+                "green"
+                if today_change is not None and round(today_change * 100, 1) > 0
+                else "red"
+                if today_change is not None and round(today_change * 100, 1) < 0
+                else None
             )
-        return table
+            delta_table.add_row(
+                Text(symbol, style=style),
+                format_optional_price(symbol_data.price if symbol_data is not None else None),
+                Text(format_net_option_delta(delta), style=style),
+                Text(format_optional_signed_percent(today_change), style=today_style),
+            )
+        return Columns((table, delta_table), expand=True)
 
     if once:
         console.print(render())

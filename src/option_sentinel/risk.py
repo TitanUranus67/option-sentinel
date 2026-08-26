@@ -6,7 +6,7 @@ from itertools import zip_longest
 from typing import Any
 
 from .config import AppConfig
-from .models import CandidateStrangle, OrderDraft, RiskCheck
+from .models import CandidateShortOption, CandidateStrangle, OrderDraft, RiskCheck
 from .persistence import Repository
 from .position_import import BrokerOptionPosition, parse_option_position
 
@@ -199,11 +199,60 @@ def validate_new_trade(
     repository: Repository,
     positions: list[dict[str, Any]],
 ) -> RiskCheck:
+    return _validate_new_open(
+        symbol=candidate.symbol,
+        earnings_within_window=candidate.earnings_within_window,
+        put_strike=candidate.put.strike,
+        includes_call=True,
+        estimated_credit_mid=candidate.estimated_credit_mid,
+        leg_count=2,
+        quantity=quantity,
+        config=config,
+        repository=repository,
+        positions=positions,
+    )
+
+
+def validate_new_option_trade(
+    candidate: CandidateShortOption,
+    *,
+    quantity: int,
+    config: AppConfig,
+    repository: Repository,
+    positions: list[dict[str, Any]],
+) -> RiskCheck:
+    return _validate_new_open(
+        symbol=candidate.symbol,
+        earnings_within_window=candidate.earnings_within_window,
+        put_strike=candidate.option.strike if candidate.option_type == "PUT" else None,
+        includes_call=candidate.option_type == "CALL",
+        estimated_credit_mid=candidate.estimated_credit_mid,
+        leg_count=1,
+        quantity=quantity,
+        config=config,
+        repository=repository,
+        positions=positions,
+    )
+
+
+def _validate_new_open(
+    *,
+    symbol: str,
+    earnings_within_window: bool,
+    put_strike: float | None,
+    includes_call: bool,
+    estimated_credit_mid: float,
+    leg_count: int,
+    quantity: int,
+    config: AppConfig,
+    repository: Repository,
+    positions: list[dict[str, Any]],
+) -> RiskCheck:
     messages: list[str] = []
-    assignment_capital = assignment_capital_required(candidate, quantity=quantity)
-    covered_shares = share_quantity(positions, candidate.symbol)
-    reserved_call_contracts = broker_short_call_contract_count(positions, candidate.symbol)
-    reserved_call_contracts += pending_short_call_contract_count(repository, candidate.symbol)
+    assignment_capital = (put_strike or 0.0) * 100 * quantity
+    covered_shares = share_quantity(positions, symbol)
+    reserved_call_contracts = broker_short_call_contract_count(positions, symbol)
+    reserved_call_contracts += pending_short_call_contract_count(repository, symbol)
     reserved_call_shares = reserved_call_contracts * 100
     available_covered_shares = max(0.0, covered_shares - reserved_call_shares)
     required_covered_shares = quantity * 100
@@ -211,10 +260,10 @@ def validate_new_trade(
     live_batches = broker_short_strangle_batches(positions)
     live_option_positions = broker_option_position_count(positions)
     pending_option_positions = pending_open_option_position_count(repository)
-    new_option_positions = quantity * 2
+    new_option_positions = quantity * leg_count
     total_option_positions = live_option_positions + pending_option_positions + new_option_positions
 
-    if candidate.earnings_within_window and not config.risk.allow_earnings:
+    if earnings_within_window and not config.risk.allow_earnings:
         messages.append("earnings date falls before expiration and allow_earnings is false")
     unknown_open_orders = unresolved_unknown_open_order_count(repository)
     if unknown_open_orders:
@@ -233,7 +282,7 @@ def validate_new_trade(
         )
     if assignment_capital > config.risk.max_assignment_capital_per_symbol:
         messages.append("max_assignment_capital_per_symbol would be exceeded")
-    if not config.risk.allow_naked_calls and not call_covered:
+    if includes_call and not config.risk.allow_naked_calls and not call_covered:
         messages.append(
             "call leg is not covered and allow_naked_calls is false "
             f"(shares: {covered_shares:g}, reserved: {reserved_call_shares:g}, "
@@ -241,10 +290,9 @@ def validate_new_trade(
         )
 
     live_stop_risk = broker_stop_risk(live_batches, stop_multiple=config.strategy.stop_multiple)
-    new_stop_risk = candidate_stop_risk(
-        candidate,
-        quantity=quantity,
-        stop_multiple=config.strategy.stop_multiple,
+    new_stop_risk = max(
+        0.0,
+        estimated_credit_mid * (config.strategy.stop_multiple - 1) * 100 * quantity,
     )
     total_stop_risk = live_stop_risk + new_stop_risk
     if total_stop_risk > config.risk.max_total_stop_risk:

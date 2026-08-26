@@ -11,24 +11,28 @@ from typing import Any
 from .broker import Broker
 from .charts import build_intraday_charts, render_intraday_charts
 from .config import AppConfig
-from .models import CandidateStrangle, OrderDraft
+from .models import CandidateShortOption, CandidateStrangle, OrderDraft
 from .order_status import (
     OrderStatusRow,
     broker_order_id_from_response,
     open_closing_order_symbols,
     refresh_order_status_rows,
 )
-from .orders import build_close_option_order, build_open_order, build_roll_option_order
+from .orders import build_close_option_order, build_open_option_order, build_open_order, build_roll_option_order
 from .persistence import Repository
 from .position_monitor import (
     AccountValueSummary,
     OptionMonitorRow,
+    SymbolMarketData,
+    account_value_summary,
     apply_closing_order_flags,
     build_monitor_rows,
     build_monitor_snapshot,
+    configured_symbol_market_data,
+    first_float,
     format_account_value_line,
     format_closing_order_flag,
-    format_optional_delta,
+    format_net_option_delta,
     format_optional_percent,
     format_optional_price,
     format_optional_signed_percent,
@@ -37,13 +41,15 @@ from .position_monitor import (
     format_today_pnl,
     format_total_theta,
     mark_from_quote,
+    net_option_deltas_by_symbol,
     total_today_pnl,
     total_position_theta,
+    underlying_price_from_quote,
 )
 from .refresh import BrokerRefreshCoordinator
-from .risk import validate_new_trade
+from .risk import validate_new_option_trade, validate_new_trade
 from .roll import RollCandidate, find_credit_roll_candidates
-from .strategy import find_candidate_strangles
+from .strategy import find_candidate_short_options, find_candidate_strangles
 from .trading import OrderOutcomeUnknownError, broker_rejection_message, draft_or_submit_order
 
 ACTION_CLOSE = 0
@@ -57,8 +63,10 @@ COLOR_STOP_LOSS = 1
 COLOR_TAKE_PROFIT = 2
 OPEN_CANDIDATE_LIMIT = 12
 OPEN_QUANTITY = 1
+OPEN_STRATEGIES = ("STRANGLE", "PUT", "CALL")
 ORDER_DRAFT_LIMIT = 100
-FULL_MONITOR_WIDTH = 138
+FULL_MONITOR_WIDTH = 108
+SYMBOL_DELTA_SIDEBAR_WIDTH = 32
 CHART_BLOCK_HEIGHT = 10
 CHART_REFRESH_SECONDS = 300
 REFRESH_MONITOR = "positions"
@@ -82,6 +90,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     selected = 0
     scroll = 0
     rows: list[OptionMonitorRow] = []
+    symbol_market_data: dict[str, SymbolMarketData] = {}
     status = "Loading positions..."
     account_status = "Total account value ... - Total day change ... - Current cash balance ..."
     order_selected = 0
@@ -115,7 +124,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                         status = f"Refresh failed: {completed.error}"
                     else:
                         last_order_refresh = completed_at
-                        rows, order_rows, live_status_note, account_summary = completed.value
+                        rows, order_rows, live_status_note, account_summary, symbol_market_data = completed.value
                         selected = min(selected, max(0, len(rows) - 1))
                         order_selected = min(order_selected, max(0, len(order_rows) - 1))
                         status = _monitor_status(rows, refreshed_at=refreshed_at)
@@ -202,6 +211,8 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                     _draw(
                         stdscr,
                         rows,
+                        symbols=config.symbols,
+                        market_data=symbol_market_data,
                         selected=selected,
                         scroll=scroll,
                         status=status,
@@ -313,7 +324,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 if refresh.waiting:
                     status = _broker_busy_message(refresh.waiting_kind)
                 else:
-                    status = _open_new_strangle(
+                    status = _open_new_trade(
                         stdscr,
                         config=config,
                         broker=broker,
@@ -374,11 +385,24 @@ def _build_monitor_rows_with_open_closing_orders(
     broker: Broker,
     config: AppConfig,
     repository: Repository,
-) -> tuple[list[OptionMonitorRow], list[OrderStatusRow], str | None, AccountValueSummary]:
+) -> tuple[
+    list[OptionMonitorRow],
+    list[OrderStatusRow],
+    str | None,
+    AccountValueSummary,
+    dict[str, SymbolMarketData],
+]:
     rows, account_summary = build_monitor_snapshot(broker, config)
+    market_data = configured_symbol_market_data(broker, config.symbols)
     order_rows, live_status_note = _refresh_todays_order_rows(broker=broker, repository=repository)
     closing_order_symbols = open_closing_order_symbols(order_rows)
-    return apply_closing_order_flags(rows, closing_order_symbols), order_rows, live_status_note, account_summary
+    return (
+        apply_closing_order_flags(rows, closing_order_symbols),
+        order_rows,
+        live_status_note,
+        account_summary,
+        market_data,
+    )
 
 
 def _refresh_todays_order_rows(*, broker: Broker, repository: Repository) -> tuple[list[OrderStatusRow], str | None]:
@@ -430,6 +454,8 @@ def _draw(
     stdscr: curses.window,
     rows: list[OptionMonitorRow],
     *,
+    symbols: list[str],
+    market_data: dict[str, SymbolMarketData],
     selected: int,
     scroll: int,
     status: str,
@@ -451,8 +477,9 @@ def _draw(
     _add_line(stdscr, 1, 0, status, width)
     _add_line(stdscr, 2, 0, account_status, width)
 
-    header = _format_monitor_header(width=width)
-    _add_line(stdscr, 4, 0, header, width, curses.A_UNDERLINE)
+    table_width = max(1, width - SYMBOL_DELTA_SIDEBAR_WIDTH)
+    header = _format_monitor_header(width=table_width)
+    _add_line(stdscr, 4, 0, header, table_width, curses.A_UNDERLINE)
 
     visible_rows = max(1, height - 6)
     if not rows:
@@ -461,13 +488,113 @@ def _draw(
         for screen_index, row in enumerate(rows[scroll : scroll + visible_rows], start=5):
             absolute_index = scroll + screen_index - 5
             attr = _monitor_row_attr(row, selected=absolute_index == selected)
-            _add_line(stdscr, screen_index, 0, _format_row(row, width=width), width, attr)
+            _add_line(stdscr, screen_index, 0, _format_row(row, width=table_width), table_width, attr)
+
+    _draw_symbol_delta_sidebar(
+        stdscr,
+        rows,
+        symbols=symbols,
+        market_data=market_data,
+        x=table_width,
+        height=height,
+        width=SYMBOL_DELTA_SIDEBAR_WIDTH,
+    )
 
     _draw_tab_bar(stdscr, active_tab=active_tab)
     stdscr.refresh()
 
     if popup and rows:
         _draw_popup(stdscr, rows[selected], popup_selected=popup_selected)
+
+
+def _draw_symbol_delta_sidebar(
+    stdscr: curses.window,
+    rows: list[OptionMonitorRow],
+    *,
+    symbols: list[str],
+    market_data: dict[str, SymbolMarketData],
+    x: int,
+    height: int,
+    width: int,
+) -> None:
+    if width < 4 or height <= 5:
+        return
+
+    try:
+        for y in range(3, height - 1):
+            stdscr.addch(y, x, curses.ACS_VLINE)
+    except curses.error:
+        pass
+
+    content_x = x + 2
+    content_width = max(1, width - 2)
+    symbol_deltas = net_option_deltas_by_symbol(rows, symbols)
+    deltas = list(symbol_deltas.values())
+    changes = [
+        market_data.get(symbol).today_change if symbol in market_data else None
+        for symbol in symbol_deltas
+    ]
+    lines = _format_symbol_delta_sidebar(rows, symbols, market_data=market_data)
+    max_lines = max(1, height - 5)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = "..."
+    for offset, line in enumerate(lines):
+        attr = curses.A_UNDERLINE if offset == 0 else curses.A_NORMAL
+        try:
+            stdscr.addnstr(4 + offset, content_x, line, content_width, attr)
+            if offset > 0 and line != "...":
+                delta_attr = _net_delta_attr(deltas[offset - 1])
+                stdscr.addnstr(4 + offset, content_x, line[:6], 6, delta_attr)
+                stdscr.addnstr(4 + offset, content_x + 16, line[16:23], 7, delta_attr)
+                stdscr.addnstr(
+                    4 + offset,
+                    content_x + content_width - 6,
+                    line[-6:],
+                    6,
+                    _today_change_attr(changes[offset - 1]),
+                )
+        except curses.error:
+            pass
+
+
+def _format_symbol_delta_sidebar(
+    rows: list[OptionMonitorRow],
+    symbols: list[str],
+    *,
+    market_data: dict[str, SymbolMarketData] | None = None,
+) -> list[str]:
+    lines = [f"{'Symbol':<6} {'Price':>8} {'Net Δ':>7} {'Today':>6}"]
+    symbols_data = market_data or {}
+    for symbol, delta in net_option_deltas_by_symbol(rows, symbols).items():
+        compact_delta = format_net_option_delta(delta).replace(" ", "")
+        data = symbols_data.get(symbol)
+        price = format_optional_price(data.price if data is not None else None)
+        today_change = format_optional_signed_percent(data.today_change if data is not None else None)
+        lines.append(f"{symbol[:6]:<6} {price:>8} {compact_delta:>7} {today_change:>6}")
+    return lines
+
+
+def _net_delta_attr(delta: float | None) -> int:
+    if delta is None:
+        return curses.A_NORMAL
+    rounded = round(delta, 1)
+    if rounded > 0:
+        return _safe_color_pair(COLOR_TAKE_PROFIT)
+    if rounded < 0:
+        return _safe_color_pair(COLOR_STOP_LOSS)
+    return curses.A_NORMAL
+
+
+def _today_change_attr(change: float | None) -> int:
+    if change is None:
+        return curses.A_NORMAL
+    displayed_percent = round(change * 100, 1)
+    if displayed_percent > 0:
+        return _safe_color_pair(COLOR_TAKE_PROFIT)
+    if displayed_percent < 0:
+        return _safe_color_pair(COLOR_STOP_LOSS)
+    return curses.A_NORMAL
 
 
 def _monitor_status(rows: list[OptionMonitorRow], *, refreshed_at: datetime | None = None) -> str:
@@ -653,18 +780,15 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
     position = row.position
     return _format_columns(
         position.underlying_symbol,
-        format_optional_price(row.underlying_price),
         f"{position.option_type[0]} {position.strike:g}",
         format_position_quantity(position),
         str(row.dte),
-        format_optional_delta(row.delta),
         format_optional_price(row.mark),
         format_optional_percent(row.pop),
         format_optional_signed_percent(row.day_pnl_pct),
         format_optional_signed_percent(row.pnl_pct),
         format_range_meter(row.day_range, width=_monitor_meter_width(width)),
         format_range_meter(row.day30_range, width=_monitor_meter_width(width)),
-        format_range_meter(row.week52_range, width=_monitor_meter_width(width)),
         row.display_alert,
         format_closing_order_flag(row.has_closing_order),
         width=width,
@@ -674,20 +798,17 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
 def _format_monitor_header(*, width: int | None = None) -> str:
     return _format_columns(
         "Symbol",
-        "Price",
         "Option",
         "Qty",
         "DTE",
-        "Delta",
         "Mid",
         "POP",
         "P/L Day %",
         "P/L %",
         "Day",
         "30D",
-        "52W",
         "Alert",
-        "Closing",
+        "Cls",
         width=width,
         header=True,
     )
@@ -695,70 +816,58 @@ def _format_monitor_header(*, width: int | None = None) -> str:
 
 def _format_columns(
     symbol: str,
-    ticker_price: str,
     option: str,
     qty: str,
     dte: str,
-    delta: str,
     mid: str,
     pop: str,
     day_pnl: str,
     pnl: str,
     day: str,
     day30: str,
-    week52: str,
     alert: str,
     closing: str,
     *,
     width: int | None = None,
     header: bool = False,
 ) -> str:
+    alert = _compact_alert(alert)
     if width is not None and width < FULL_MONITOR_WIDTH:
-        alert = _compact_alert(alert)
-        closing = "Close" if closing == "Closing" else closing
         meter_width = _monitor_meter_width(width)
         qty_width = 2 if width < 107 else 3
         if header and qty_width == 2:
             qty = "Q"
         day_column = f"{day:^{meter_width}}" if header else f"{day:>{meter_width}}"
         day30_column = f"{day30:^{meter_width}}" if header else f"{day30:>{meter_width}}"
-        week52_column = f"{week52:^{meter_width}}" if header else f"{week52:>{meter_width}}"
         return (
             f"{symbol:<6} "
-            f"{ticker_price:>6} "
             f"{option:<6} "
             f"{qty:>{qty_width}} "
             f"{dte:>3} "
-            f"{delta:>5} "
             f"{mid:>6} "
             f"{pop:>4} "
             f"{day_pnl:>9} "
             f"{pnl:>7} "
             f"{day_column} "
             f"{day30_column} "
-            f"{week52_column} "
             f"{alert:<12} "
-            f"{closing:<5}"
+            f"{closing:^3}"
         )
     day_column = f"{day:^11}" if header else f"{day:>11}"
     day30_column = f"{day30:^11}" if header else f"{day30:>11}"
-    week52_column = f"{week52:^11}" if header else f"{week52:>11}"
     return (
         f"{symbol:<6} "
-        f"{ticker_price:>6} "
         f"{option:<8} "
         f"{qty:>3} "
         f"{dte:>4} "
-        f"{delta:>6} "
         f"{mid:>7} "
         f"{pop:>5} "
         f"{day_pnl:>9} "
         f"{pnl:>9} "
         f"{day_column} "
         f"{day30_column} "
-        f"{week52_column} "
-        f"{alert:<21} "
-        f"{closing:<7}"
+        f"{alert:<12} "
+        f"{closing:^3}"
     )
 
 
@@ -1242,7 +1351,7 @@ def _add_menu_item(stdscr: curses.window, y: int, x: int, label: str, width: int
     _add_line(stdscr, y, x, f"{prefix}{label}", width, attr)
 
 
-def _open_new_strangle(
+def _open_new_trade(
     stdscr: curses.window,
     *,
     config: AppConfig,
@@ -1251,6 +1360,14 @@ def _open_new_strangle(
     refresh: BrokerRefreshCoordinator,
     open_position_counts: dict[str, int],
 ) -> str:
+    try:
+        share_account_percentages = _share_account_percentages(broker, config.symbols)
+    except Exception as exc:
+        status = f"Open lookup failed: share allocation unavailable: {exc}"
+        _draw_message_box(stdscr, [status, "Press any key."])
+        _wait_for_key(stdscr)
+        return status
+
     symbol = _select_stock_symbol(
         stdscr,
         config.symbols,
@@ -1258,27 +1375,32 @@ def _open_new_strangle(
         broker=broker,
         refresh=refresh,
         open_position_counts=open_position_counts,
+        share_account_percentages=share_account_percentages,
     )
     if symbol is None:
         return "Open cancelled."
 
+    strategy = _select_open_strategy(stdscr)
+    if strategy is None:
+        return "Open cancelled."
+
     try:
-        candidates = _open_candidate_strangles(config=config, broker=broker, symbol=symbol)
+        candidates = _open_candidates(config=config, broker=broker, symbol=symbol, strategy=strategy)
     except Exception as exc:
         _draw_message_box(stdscr, [f"Open lookup failed for {symbol}: {exc}", "Press any key."])
         _wait_for_key(stdscr)
         return f"Open lookup failed for {symbol}: {exc}"
 
     if not candidates:
-        _draw_open_candidates(stdscr, symbol, [], config=config)
+        _draw_open_candidates(stdscr, symbol, [], config=config, strategy=strategy)
         _wait_for_key(stdscr)
-        return f"No short strangle candidates found for {symbol}."
+        return f"No short {strategy.lower()} candidates found for {symbol}."
 
-    candidate = _select_open_candidate(stdscr, symbol, candidates, config=config)
+    candidate = _select_open_candidate(stdscr, symbol, candidates, config=config, strategy=strategy)
     if candidate is None:
         return "Open cancelled."
 
-    status = _open_candidate_strangle_with_confirmation(
+    status = _open_candidate_with_confirmation(
         stdscr,
         candidate,
         config=config,
@@ -1293,7 +1415,9 @@ def _open_new_strangle(
     return status
 
 
-def _open_candidate_strangles(*, config: AppConfig, broker: Broker, symbol: str) -> list[CandidateStrangle]:
+def _open_candidates(
+    *, config: AppConfig, broker: Broker, symbol: str, strategy: str
+) -> list[CandidateStrangle] | list[CandidateShortOption]:
     normalized = symbol.upper()
     today = date.today()
     chain = broker.get_option_chain(
@@ -1302,11 +1426,21 @@ def _open_candidate_strangles(*, config: AppConfig, broker: Broker, symbol: str)
         to_date=today + timedelta(days=config.strategy.dte_max),
     )
     quotes = broker.get_quotes([normalized])
-    return find_candidate_strangles(
+    earnings_date = _earnings_date_from_quotes(quotes, normalized)
+    if strategy == "STRANGLE":
+        return find_candidate_strangles(
+            chain,
+            config,
+            as_of=today,
+            earnings_date=earnings_date,
+            limit=OPEN_CANDIDATE_LIMIT,
+        )
+    return find_candidate_short_options(
         chain,
         config,
+        option_type=strategy,
         as_of=today,
-        earnings_date=_earnings_date_from_quotes(quotes, normalized),
+        earnings_date=earnings_date,
         limit=OPEN_CANDIDATE_LIMIT,
     )
 
@@ -1321,26 +1455,71 @@ def _open_candidate_strangle_with_confirmation(
     quantity: int,
     confirm_func,
 ) -> str:
+    return _open_candidate_with_confirmation(
+        stdscr,
+        candidate,
+        config=config,
+        broker=broker,
+        repository=repository,
+        quantity=quantity,
+        confirm_func=confirm_func,
+    )
+
+
+def _open_candidate_with_confirmation(
+    stdscr: curses.window | None,
+    candidate: CandidateStrangle | CandidateShortOption,
+    *,
+    config: AppConfig,
+    broker: Broker,
+    repository: Repository,
+    quantity: int,
+    confirm_func,
+) -> str:
     try:
         submitted_drafts = repository.list_order_drafts(limit=None, only_today=True)
         refresh_order_status_rows(submitted_drafts, broker, repository)
         positions = broker.get_positions()
-        risk = validate_new_trade(candidate, quantity=quantity, config=config, repository=repository, positions=positions)
+        if isinstance(candidate, CandidateStrangle):
+            risk = validate_new_trade(
+                candidate, quantity=quantity, config=config, repository=repository, positions=positions
+            )
+        else:
+            risk = validate_new_option_trade(
+                candidate, quantity=quantity, config=config, repository=repository, positions=positions
+            )
     except Exception as exc:
         return f"Open not placed: risk check failed: {exc}"
 
     if not risk.allowed:
         return f"Open blocked for {candidate.symbol}: {'; '.join(risk.messages)}"
 
-    order = build_open_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
-    mode_line = "Dry-run: no order will be placed." if config.risk.dry_run else "Live mode: this can submit a real order."
+    if isinstance(candidate, CandidateStrangle):
+        order = build_open_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
+        strategy_label = "short strangle"
+        leg_line = f"Sell put {candidate.put.strike:g} and call {candidate.call.strike:g}"
+        risk_line = f"Assignment capital {risk.assignment_capital:,.0f}  Call covered: {risk.call_covered}"
+    else:
+        order = build_open_option_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
+        strategy_label = f"short {candidate.option_type.lower()}"
+        leg_line = f"Sell {candidate.option_type.lower()} {candidate.strike:g} (delta {candidate.option.delta:.3f})"
+        risk_line = (
+            f"Assignment capital {risk.assignment_capital:,.0f}"
+            if candidate.option_type == "PUT"
+            else f"Call covered: {risk.call_covered}"
+        )
+    mode_line = (
+        "Dry-run: no order will be placed."
+        if config.risk.dry_run
+        else "Live mode: this can submit a real order."
+    )
     confirmed = confirm_func(
         stdscr,
         [
-            f"Open {quantity} {candidate.symbol} short strangle exp {candidate.expiration.isoformat()}",
-            f"Sell put {candidate.put.strike:g} and call {candidate.call.strike:g}",
+            f"Open {quantity} {candidate.symbol} {strategy_label} exp {candidate.expiration.isoformat()}",
+            leg_line,
             f"Limit credit {candidate.estimated_credit_mid:.2f}  Bid credit {candidate.estimated_credit_bid:.2f}",
-            f"Assignment capital {risk.assignment_capital:,.0f}  Call covered: {risk.call_covered}",
+            risk_line,
             mode_line,
             "Submit this limit open order?",
         ],
@@ -1390,6 +1569,107 @@ def _open_position_counts_by_symbol(rows: list[OptionMonitorRow]) -> dict[str, i
     return counts
 
 
+def _share_account_percentages(broker: Broker, symbols: list[str]) -> dict[str, float | None]:
+    choices = _configured_stock_symbols(symbols)
+    account = broker.get_account()
+    total_value = account_value_summary(account).total_value
+    if total_value is None or total_value <= 0:
+        return {symbol: None for symbol in choices}
+
+    securities_account = account.get("securitiesAccount", account)
+    raw_positions = securities_account.get("positions") if isinstance(securities_account, dict) else None
+    positions = raw_positions if isinstance(raw_positions, list) else broker.get_positions()
+    share_quantities: dict[str, float] = {}
+    market_values: dict[str, float] = {}
+    symbols_needing_quotes: set[str] = set()
+    wanted = set(choices)
+
+    for position in positions:
+        instrument = position.get("instrument") or {}
+        asset_type = str(instrument.get("assetType") or position.get("assetType") or "").upper()
+        symbol = str(instrument.get("symbol") or position.get("symbol") or "").strip().upper()
+        if asset_type != "EQUITY" or symbol not in wanted:
+            continue
+        shares = first_float(position.get("longQuantity"), position.get("long_quantity")) or 0.0
+        if shares <= 0:
+            continue
+        share_quantities[symbol] = share_quantities.get(symbol, 0.0) + shares
+        market_value = first_float(position.get("marketValue"), position.get("market_value"))
+        if market_value is None:
+            symbols_needing_quotes.add(symbol)
+        else:
+            market_values[symbol] = market_values.get(symbol, 0.0) + market_value
+
+    if symbols_needing_quotes:
+        quotes = broker.get_quotes(sorted(symbols_needing_quotes))
+        for symbol in symbols_needing_quotes:
+            price = underlying_price_from_quote(quotes, symbol)
+            if price is not None:
+                market_values[symbol] = share_quantities[symbol] * price
+            else:
+                market_values.pop(symbol, None)
+
+    percentages: dict[str, float | None] = {}
+    for symbol in choices:
+        if symbol not in share_quantities:
+            percentages[symbol] = 0.0
+        elif symbol not in market_values:
+            percentages[symbol] = None
+        else:
+            percentages[symbol] = round(market_values[symbol] / total_value * 100, 4)
+    return percentages
+
+
+def _select_open_strategy(stdscr: curses.window) -> str | None:
+    selected = 0
+    stdscr.timeout(-1)
+    try:
+        while True:
+            _draw_open_strategy_popup(stdscr, selected_index=selected)
+            key = stdscr.getch()
+            navigation_delta = _navigation_delta(key, page_size=len(OPEN_STRATEGIES))
+            if key in (27, ord("q"), curses.KEY_LEFT):
+                return None
+            if navigation_delta:
+                selected = min(len(OPEN_STRATEGIES) - 1, max(0, selected + navigation_delta))
+            elif key in (10, 13, curses.KEY_ENTER):
+                return OPEN_STRATEGIES[selected]
+    finally:
+        stdscr.timeout(250)
+
+
+def _draw_open_strategy_popup(stdscr: curses.window, *, selected_index: int) -> None:
+    height, width = stdscr.getmaxyx()
+    if height < 9 or width < 34:
+        stdscr.erase()
+        _add_line(stdscr, 0, 0, "Terminal too small for strategy selector.", width)
+        stdscr.refresh()
+        return
+
+    box_width = min(38, width - 4)
+    box_height = 9
+    top = max(0, (height - box_height) // 2)
+    left = max(0, (width - box_width) // 2)
+    horizontal = "-" * (box_width - 2)
+    _add_line(stdscr, top, left, f"+{horizontal}+", box_width)
+    for offset in range(1, box_height - 1):
+        _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
+    _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
+    _add_line(stdscr, top + 1, left + 2, "Sell to open", box_width - 4, curses.A_BOLD)
+    for offset, strategy in enumerate(OPEN_STRATEGIES):
+        label = strategy.title()
+        _add_menu_item(
+            stdscr,
+            top + 3 + offset,
+            left + 2,
+            label,
+            box_width - 4,
+            selected=selected_index == offset,
+        )
+    _add_line(stdscr, top + 7, left + 2, "Enter selects. Esc cancels.", box_width - 4)
+    stdscr.refresh()
+
+
 def _select_stock_symbol(
     stdscr: curses.window,
     symbols: list[str],
@@ -1398,6 +1678,7 @@ def _select_stock_symbol(
     broker: Broker,
     refresh: BrokerRefreshCoordinator,
     open_position_counts: dict[str, int] | None = None,
+    share_account_percentages: dict[str, float | None] | None = None,
 ) -> str | None:
     choices = _configured_stock_symbols(symbols)
     if not choices:
@@ -1462,6 +1743,7 @@ def _select_stock_symbol(
                     implied_volatilities=implied_volatilities,
                     implied_volatility_errors=implied_volatility_errors,
                     open_position_counts=open_position_counts,
+                    share_account_percentages=share_account_percentages,
                     selected_index=selected,
                     scroll=scroll,
                 )
@@ -1478,6 +1760,7 @@ def _select_stock_symbol(
                 implied_volatilities=implied_volatilities,
                 implied_volatility_errors=implied_volatility_errors,
                 open_position_counts=open_position_counts,
+                share_account_percentages=share_account_percentages,
                 selected_index=selected,
                 scroll=scroll,
             )
@@ -1540,6 +1823,7 @@ def _draw_stock_symbol_popup(
     implied_volatilities: dict[str, float | None] | None = None,
     implied_volatility_errors: dict[str, str] | None = None,
     open_position_counts: dict[str, int] | None = None,
+    share_account_percentages: dict[str, float | None] | None = None,
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
@@ -1553,7 +1837,7 @@ def _draw_stock_symbol_popup(
 
     longest_symbol = max((len(symbol) for symbol in symbols), default=0)
     longest_error = max((len(message) for message in (implied_volatility_errors or {}).values()), default=0)
-    box_width = min(max(38, longest_symbol + 18, longest_error + 4), max(34, width - 4))
+    box_width = min(max(42, longest_symbol + 30, longest_error + 4), max(34, width - 4))
     box_height = min(max(8, len(symbols) + 5), height - 2)
     top = max(0, (height - box_height) // 2)
     left = max(0, (width - box_width) // 2)
@@ -1562,8 +1846,15 @@ def _draw_stock_symbol_popup(
     for offset in range(1, box_height - 1):
         _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
     _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
-    _add_line(stdscr, top + 1, left + 2, "Open new short strangle", box_width - 4, curses.A_BOLD)
-    header = f"{'Select stock':<12} {'IV':>7} {'Open':>6}"
+    _add_line(
+        stdscr,
+        top + 1,
+        left + 2,
+        "Sell to open - select stock",
+        box_width - 4,
+        curses.A_BOLD,
+    )
+    header = f"{'Select stock':<12} {'IV':>7} {'Open':>6} {'Shares %':>8}"
     _add_line(stdscr, top + 2, left + 2, header, box_width - 4)
 
     visible_symbols: list[str] = []
@@ -1577,6 +1868,7 @@ def _draw_stock_symbol_popup(
             iv = implied_volatilities.get(symbol) if iv_loaded and implied_volatilities is not None else None
             iv_failed = implied_volatility_errors is not None and symbol in implied_volatility_errors
             open_positions = (open_position_counts or {}).get(symbol, 0)
+            share_account_percentage = (share_account_percentages or {}).get(symbol)
             _add_menu_item(
                 stdscr,
                 top + 3 + offset,
@@ -1587,6 +1879,7 @@ def _draw_stock_symbol_popup(
                     loaded=iv_loaded,
                     failed=iv_failed,
                     open_positions=open_positions,
+                    share_account_percentage=share_account_percentage,
                 ),
                 box_width - 4,
                 selected=selected_index == scroll + offset,
@@ -1614,6 +1907,7 @@ def _format_symbol_iv(
     loaded: bool,
     failed: bool = False,
     open_positions: int = 0,
+    share_account_percentage: float | None = None,
 ) -> str:
     if not loaded:
         iv = "..."
@@ -1623,16 +1917,18 @@ def _format_symbol_iv(
         iv = "-"
     else:
         iv = f"{implied_volatility:.1f}%"
-    return f"{symbol:<12} {iv:>7} {open_positions:>6}"
+    shares_pct = "-" if share_account_percentage is None else f"{share_account_percentage:.1f}%"
+    return f"{symbol:<12} {iv:>7} {open_positions:>6} {shares_pct:>8}"
 
 
 def _select_open_candidate(
     stdscr: curses.window,
     symbol: str,
-    candidates: list[CandidateStrangle],
+    candidates: list[CandidateStrangle] | list[CandidateShortOption],
     *,
     config: AppConfig,
-) -> CandidateStrangle | None:
+    strategy: str = "STRANGLE",
+) -> CandidateStrangle | CandidateShortOption | None:
     selected = 0
     scroll = 0
     stdscr.timeout(-1)
@@ -1640,7 +1936,15 @@ def _select_open_candidate(
         while True:
             visible_rows = _open_visible_row_count(*stdscr.getmaxyx(), candidate_count=len(candidates))
             if visible_rows <= 0:
-                _draw_open_candidates(stdscr, symbol, candidates, config=config, selected_index=selected, scroll=scroll)
+                _draw_open_candidates(
+                    stdscr,
+                    symbol,
+                    candidates,
+                    config=config,
+                    strategy=strategy,
+                    selected_index=selected,
+                    scroll=scroll,
+                )
                 stdscr.getch()
                 return None
             if selected < scroll:
@@ -1648,7 +1952,9 @@ def _select_open_candidate(
             if selected >= scroll + visible_rows:
                 scroll = selected - visible_rows + 1
 
-            _draw_open_candidates(stdscr, symbol, candidates, config=config, selected_index=selected, scroll=scroll)
+            _draw_open_candidates(
+                stdscr, symbol, candidates, config=config, strategy=strategy, selected_index=selected, scroll=scroll
+            )
             key = stdscr.getch()
             navigation_delta = _navigation_delta(key, page_size=visible_rows)
             if key in (27, ord("q"), curses.KEY_LEFT):
@@ -1671,16 +1977,17 @@ def _open_visible_row_count(height: int, width: int, *, candidate_count: int) ->
 def _draw_open_candidates(
     stdscr: curses.window,
     symbol: str,
-    candidates: list[CandidateStrangle],
+    candidates: list[CandidateStrangle] | list[CandidateShortOption],
     *,
     config: AppConfig,
+    strategy: str = "STRANGLE",
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
     height, width = stdscr.getmaxyx()
     if height < 8 or width < 48:
         stdscr.erase()
-        _add_line(stdscr, 0, 0, "Terminal too small for strangle candidates.", width)
+        _add_line(stdscr, 0, 0, f"Terminal too small for {strategy.lower()} candidates.", width)
         _add_line(stdscr, 1, 0, "Press any key to return.", width)
         stdscr.refresh()
         return
@@ -1694,37 +2001,75 @@ def _draw_open_candidates(
     for offset in range(1, box_height - 1):
         _add_line(stdscr, top + offset, left, f"|{' ' * (box_width - 2)}|", box_width)
     _add_line(stdscr, top + box_height - 1, left, f"+{horizontal}+", box_width)
-    _add_line(stdscr, top + 1, left + 2, f"Short strangle candidates for {symbol.upper()}", box_width - 4, curses.A_BOLD)
+    _add_line(
+        stdscr,
+        top + 1,
+        left + 2,
+        f"Short {strategy.lower()} candidates for {symbol.upper()}",
+        box_width - 4,
+        curses.A_BOLD,
+    )
+    target_delta = config.strategy.put_delta if strategy == "PUT" else config.strategy.call_delta
+    delta_targets = (
+        f"put delta {config.strategy.put_delta:.2f}, call delta {config.strategy.call_delta:.2f}"
+        if strategy == "STRANGLE"
+        else f"{strategy.lower()} delta {target_delta:.2f}"
+    )
     _add_line(
         stdscr,
         top + 2,
         left + 2,
         (
             f"Closest to {config.strategy.dte_min}-{config.strategy.dte_max} DTE, "
-            f"put delta {config.strategy.put_delta:.2f}, call delta {config.strategy.call_delta:.2f}"
+            + delta_targets
         ),
         box_width - 4,
     )
 
-    visible_candidates: list[CandidateStrangle] = []
+    visible_candidates: list[CandidateStrangle] | list[CandidateShortOption] = []
     if not candidates:
-        _add_line(stdscr, top + 4, left + 2, "No matching short strangles found.", box_width - 4, curses.A_BOLD)
+        _add_line(
+            stdscr,
+            top + 4,
+            left + 2,
+            f"No matching short {strategy.lower()} candidates found.",
+            box_width - 4,
+            curses.A_BOLD,
+        )
     else:
-        header = f"{'Exp':<10} {'DTE':>4} {'Put':>8} {'PDel':>7} {'Call':>8} {'CDel':>7} {'BidCr':>7} {'MidCr':>7}"
+        if strategy == "STRANGLE":
+            header = f"{'Exp':<10} {'DTE':>4} {'Put':>8} {'PDel':>7} {'Call':>8} {'CDel':>7} {'BidCr':>7} {'MidCr':>7}"
+        else:
+            header = (
+                f"{'Exp':<10} {'DTE':>4} {'Type':>6} {'Strike':>9} "
+                f"{'Delta':>8} {'Bid':>8} {'Ask':>8} {'MidCr':>8}"
+            )
         _add_line(stdscr, top + 4, left + 2, header, box_width - 4, curses.A_UNDERLINE)
         max_rows = max(0, box_height - 7)
         visible_candidates = candidates[scroll : scroll + max_rows]
         for offset, candidate in enumerate(visible_candidates):
-            line = (
-                f"{candidate.expiration.isoformat():<10} "
-                f"{candidate.dte:>4} "
-                f"{candidate.put.strike:>8g} "
-                f"{candidate.put.delta:>7.3f} "
-                f"{candidate.call.strike:>8g} "
-                f"{candidate.call.delta:>7.3f} "
-                f"{candidate.estimated_credit_bid:>7.2f} "
-                f"{candidate.estimated_credit_mid:>7.2f}"
-            )
+            if isinstance(candidate, CandidateStrangle):
+                line = (
+                    f"{candidate.expiration.isoformat():<10} "
+                    f"{candidate.dte:>4} "
+                    f"{candidate.put.strike:>8g} "
+                    f"{candidate.put.delta:>7.3f} "
+                    f"{candidate.call.strike:>8g} "
+                    f"{candidate.call.delta:>7.3f} "
+                    f"{candidate.estimated_credit_bid:>7.2f} "
+                    f"{candidate.estimated_credit_mid:>7.2f}"
+                )
+            else:
+                line = (
+                    f"{candidate.expiration.isoformat():<10} "
+                    f"{candidate.dte:>4} "
+                    f"{candidate.option_type:>6} "
+                    f"{candidate.strike:>9g} "
+                    f"{candidate.option.delta:>8.3f} "
+                    f"{candidate.option.bid:>8.2f} "
+                    f"{candidate.option.ask:>8.2f} "
+                    f"{candidate.estimated_credit_mid:>8.2f}"
+                )
             attr = curses.A_REVERSE if selected_index == scroll + offset else curses.A_NORMAL
             _add_line(stdscr, top + 5 + offset, left + 2, line, box_width - 4, attr)
 

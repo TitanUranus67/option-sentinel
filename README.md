@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
 
-OptionSentinel is a safety-focused terminal dashboard for monitoring and managing option positions, orders, portfolio risk, and intraday charts. It includes a Schwab Trader API adapter and an explicit built-in workflow for scanning and opening short strangles.
+OptionSentinel is a safety-focused terminal dashboard for monitoring and managing option positions, orders, portfolio risk, and intraday charts. It includes a Schwab Trader API adapter and built-in workflows for scanning and opening short strangles, puts, and calls.
 
 > [!CAUTION]
 > This is experimental software, not financial advice. Live mode can submit real orders. Options can produce substantial losses, and broker or network failures can leave order outcomes uncertain. Read the [full disclaimer](DISCLAIMER.md) before use.
@@ -19,10 +19,10 @@ OptionSentinel is independent and is not affiliated with or endorsed by Charles 
 - Close or roll individual short-option legs with explicit confirmation and limit orders.
 - Adjust working order limit prices using a per-unit midpoint.
 - View intraday underlying charts with option-strike overlays.
-- Scan configured symbols for liquid short-strangle candidates by DTE and delta.
+- Scan configured symbols for liquid short-strangle, put, or call candidates by DTE and delta.
 - Develop and test without brokerage access using the deterministic fake broker.
 
-The monitor, order dashboard, risk accounting, and charts are strategy-neutral. Short-strangle scanning, entry, legacy import, and paired-trade tracking remain explicitly strategy-specific.
+The monitor, order dashboard, risk accounting, and charts are strategy-neutral. The interactive sell-to-open workflow supports strangles and standalone puts or calls. Legacy import and paired-trade tracking remain explicitly strangle-specific.
 
 ## Safety model
 
@@ -68,7 +68,7 @@ option-sentinel monitor --once
 option-sentinel strangle scan --broker fake
 ```
 
-Press `F1` for positions, `F2` for orders, and `F3` for charts. Use `q` to quit and `r` to refresh. In F1, select an option and press Enter for close or roll actions; press `n` to scan for a new short strangle.
+Press `F1` for positions, `F2` for orders, and `F3` for charts. Use `q` to quit and `r` to refresh. In F1, select an option and press Enter for close or roll actions; press `n` to choose a short strangle, put, or call to sell to open.
 
 ## Schwab setup
 

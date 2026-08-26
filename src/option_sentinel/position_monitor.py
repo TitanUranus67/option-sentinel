@@ -26,6 +26,12 @@ class AccountValueSummary:
 
 
 @dataclass(frozen=True)
+class SymbolMarketData:
+    price: float | None
+    today_change: float | None
+
+
+@dataclass(frozen=True)
 class OptionMonitorRow:
     position: BrokerOptionPosition
     mark: float | None
@@ -198,6 +204,68 @@ def apply_closing_order_flags(
     ]
 
 
+def net_option_deltas_by_symbol(
+    rows: list[OptionMonitorRow],
+    symbols: list[str],
+) -> dict[str, float | None]:
+    """Return share-equivalent net option delta for each configured symbol."""
+
+    normalized_symbols = list(
+        dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
+    )
+    deltas: dict[str, float | None] = {}
+    for symbol in normalized_symbols:
+        symbol_rows = [row for row in rows if row.position.underlying_symbol.strip().upper() == symbol]
+        if not symbol_rows:
+            deltas[symbol] = 0.0
+            continue
+        if any(row.delta is None for row in symbol_rows):
+            deltas[symbol] = None
+            continue
+
+        total = 0.0
+        for row in symbol_rows:
+            side = 1 if row.position.side == "LONG" else -1
+            total += float(row.delta) * side * row.position.quantity * 100
+        deltas[symbol] = round(total, 2)
+    return deltas
+
+
+def configured_symbol_market_data(
+    broker: Broker,
+    symbols: list[str],
+) -> dict[str, SymbolMarketData]:
+    normalized_symbols = list(
+        dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
+    )
+    if not normalized_symbols:
+        return {}
+    try:
+        quotes = broker.get_quotes(normalized_symbols)
+    except Exception:
+        return {
+            symbol: SymbolMarketData(price=None, today_change=None)
+            for symbol in normalized_symbols
+        }
+    return {
+        symbol: SymbolMarketData(
+            price=underlying_price_from_quote(quotes, symbol),
+            today_change=today_change_pct_from_quote(quotes, symbol),
+        )
+        for symbol in normalized_symbols
+    }
+
+
+def configured_symbol_today_changes(
+    broker: Broker,
+    symbols: list[str],
+) -> dict[str, float | None]:
+    return {
+        symbol: data.today_change
+        for symbol, data in configured_symbol_market_data(broker, symbols).items()
+    }
+
+
 def _option_symbol_key(symbol: Any) -> str:
     return str(symbol or "").strip().upper().replace(" ", "")
 
@@ -345,6 +413,32 @@ def mark_from_quote(quotes: dict[str, Any], symbol: str) -> float | None:
 def underlying_price_from_quote(quotes: dict[str, Any], symbol: str) -> float | None:
     quote = quote_for(quotes, symbol)
     return first_float(quote.get("lastPrice"), quote.get("last"), quote.get("mark"), quote.get("markPrice"))
+
+
+def today_change_pct_from_quote(quotes: dict[str, Any], symbol: str) -> float | None:
+    quote = quote_for(quotes, symbol)
+    percent = first_quote_float(
+        quote,
+        "netPercentChange",
+        "netPercentChangeInDouble",
+        "regularMarketPercentChange",
+        "markPercentChange",
+        "percentChange",
+    )
+    if percent is not None:
+        return round(percent / 100, 6)
+
+    current = underlying_price_from_quote(quotes, symbol)
+    previous_close = first_quote_float(
+        quote,
+        "previousClose",
+        "previousClosePrice",
+        "regularMarketPreviousClose",
+        "closePrice",
+    )
+    if current is None or previous_close in (None, 0):
+        return None
+    return round((current - previous_close) / previous_close, 6)
 
 
 def day_range_from_quote(quotes: dict[str, Any], symbol: str, *, current: float | None = None) -> PriceRange | None:
@@ -662,6 +756,21 @@ def format_optional_price(value: float | None) -> str:
 
 def format_optional_delta(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f}"
+
+
+def format_net_option_delta(value: float | None) -> str:
+    if value is None:
+        return "-"
+    rounded = round(value, 1)
+    if rounded == 0:
+        rounded = 0.0
+    if rounded > 0:
+        direction = "↑"
+    elif rounded < 0:
+        direction = "↓"
+    else:
+        direction = "·"
+    return f"{rounded:+.1f} {direction}"
 
 
 def format_optional_percent(value: float | None) -> str:
