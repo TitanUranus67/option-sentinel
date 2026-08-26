@@ -112,6 +112,7 @@ class FakeBroker(Broker):
                     "bidPrice": self._underlyings[normalized] - 0.05,
                     "askPrice": self._underlyings[normalized] + 0.05,
                     "mark": self._underlyings[normalized],
+                    "netPercentChange": 0.0,
                     "lowPrice": round(self._underlyings[normalized] * 0.98, 2),
                     "highPrice": round(self._underlyings[normalized] * 1.02, 2),
                     "30DayLow": round(self._underlyings[normalized] * 0.90, 2),

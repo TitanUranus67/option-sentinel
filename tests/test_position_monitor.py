@@ -17,6 +17,7 @@ from option_sentinel.monitor_tui import (
     _format_order_row,
     _format_monitor_header,
     _format_row,
+    _format_symbol_delta_sidebar,
     _format_symbol_iv,
     _monitor_status,
     _monitor_row_attr,
@@ -42,14 +43,18 @@ from option_sentinel.position_import import BrokerOptionPosition
 from option_sentinel.position_monitor import (
     PriceRange,
     AccountValueSummary,
+    SymbolMarketData,
     account_value_summary,
     apply_closing_order_flags,
     build_monitor_rows,
     build_monitor_snapshot,
     build_monitor_rows_from_quotes,
+    configured_symbol_market_data,
+    configured_symbol_today_changes,
     day30_range_from_quote,
     day_range_from_quote,
     format_closing_order_flag,
+    format_net_option_delta,
     format_account_value_line,
     format_position_quantity,
     delta_from_quote,
@@ -57,9 +62,11 @@ from option_sentinel.position_monitor import (
     format_total_theta,
     format_range_meter,
     mark_from_quote,
+    net_option_deltas_by_symbol,
     parse_broker_option_positions,
     price_range_from_history,
     theta_from_quote,
+    today_change_pct_from_quote,
     total_today_pnl,
     total_position_theta,
     trailing_price_ranges_from_broker,
@@ -282,18 +289,18 @@ def test_format_row_contains_close_menu_target_context() -> None:
     formatted = _format_row(row)
 
     assert "NVDA" in formatted
-    assert "200.00" in formatted
     assert "C 220" in formatted
-    assert formatted.index("NVDA") < formatted.index("200.00") < formatted.index("C 220")
+    assert formatted.index("NVDA") < formatted.index("C 220")
+    assert "200.00" not in formatted
     assert "SHORT" not in formatted
     assert "-1" in formatted
-    assert "0.10" in formatted
+    assert "0.10" not in formatted
     assert "90%" in formatted
     assert formatted.index("0.66") < formatted.index("90%")
     assert "+59.0%" in formatted
     assert "+12.3%" in formatted
     assert formatted.index("+12.3%") < formatted.index("+59.0%")
-    assert formatted.count("[----|----]") == 3
+    assert formatted.count("[----|----]") == 2
     assert expiration.isoformat() not in formatted
     assert "1.61" not in formatted
 
@@ -361,7 +368,7 @@ def test_format_row_uses_compact_range_meters_when_full_layout_does_not_fit() ->
     formatted = _format_row(row, width=100)
 
     assert len(formatted) <= 100
-    assert formatted.count("[-|-]") == 3
+    assert formatted.count("[-|-]") == 2
     assert "OK" in formatted
 
 
@@ -400,9 +407,159 @@ def test_monitor_header_aligns_with_compact_row_values() -> None:
 
     assert len(header) == len(formatted)
     assert header.index("Qty") + len("Qty") == formatted.index("-1") + len("-1")
-    assert header.index("Delta") + len("Delta") == formatted.index("0.10") + len("0.10")
-    assert header.rindex("Day") + 1 == formatted.index("[--|--]") + 3
+    assert "Delta" not in header
+    assert "52W" not in header
+    assert header.index("Mid") + len("Mid") == formatted.index("0.66") + len("0.66")
+    assert header.rindex("Day") + 1 == formatted.index("[----|----]") + 5
     assert len(_format_monitor_header(width=100)) <= 100
+
+
+def test_net_option_deltas_combine_side_quantity_and_contract_multiplier() -> None:
+    expiration = date.today() + timedelta(days=30)
+    positions = [
+        BrokerOptionPosition(
+            symbol="NVDA  260717P00180000",
+            underlying_symbol="NVDA",
+            expiration=expiration,
+            option_type="PUT",
+            strike=180,
+            side="SHORT",
+            quantity=2,
+            average_price=1.0,
+        ),
+        BrokerOptionPosition(
+            symbol="NVDA  260717C00220000",
+            underlying_symbol="NVDA",
+            expiration=expiration,
+            option_type="CALL",
+            strike=220,
+            side="SHORT",
+            quantity=1,
+            average_price=1.0,
+        ),
+        BrokerOptionPosition(
+            symbol="TSLA  260717C00450000",
+            underlying_symbol="TSLA",
+            expiration=expiration,
+            option_type="CALL",
+            strike=450,
+            side="LONG",
+            quantity=3,
+            average_price=1.0,
+        ),
+        BrokerOptionPosition(
+            symbol="RKLB  260717C00100000",
+            underlying_symbol="RKLB",
+            expiration=expiration,
+            option_type="CALL",
+            strike=100,
+            side="SHORT",
+            quantity=1,
+            average_price=1.0,
+        ),
+    ]
+    rows = build_monitor_rows_from_quotes(
+        positions,
+        {
+            "NVDA  260717P00180000": {"delta": -0.16},
+            "NVDA  260717C00220000": {"delta": 0.10},
+            "TSLA  260717C00450000": {"delta": 0.25},
+        },
+        AppConfig(),
+    )
+
+    deltas = net_option_deltas_by_symbol(rows, ["nvda", "TSLA", "INTC", "RKLB", "NVDA"])
+
+    assert deltas == {"NVDA": 22.0, "TSLA": 75.0, "INTC": 0.0, "RKLB": None}
+    assert format_net_option_delta(deltas["NVDA"]) == "+22.0 ↑"
+    assert format_net_option_delta(-10) == "-10.0 ↓"
+    assert format_net_option_delta(-0.01) == "+0.0 ·"
+    assert format_net_option_delta(deltas["INTC"]) == "+0.0 ·"
+    assert format_net_option_delta(deltas["RKLB"]) == "-"
+
+
+def test_symbol_delta_sidebar_lists_every_configured_symbol() -> None:
+    lines = _format_symbol_delta_sidebar([], ["nvda", "TSLA", "NVDA", "INTC"])
+
+    assert lines[0] == "Symbol    Price   Net Δ  Today"
+    assert [line.split()[0] for line in lines[1:]] == ["NVDA", "TSLA", "INTC"]
+    assert all("+0.0·" in line for line in lines[1:])
+    assert all(line.endswith("     -") for line in lines[1:])
+
+
+def test_symbol_delta_sidebar_shows_today_change_percentage() -> None:
+    lines = _format_symbol_delta_sidebar(
+        [],
+        ["NVDA", "TSLA", "INTC"],
+        market_data={
+            "NVDA": SymbolMarketData(price=200.0, today_change=0.01234),
+            "TSLA": SymbolMarketData(price=350.25, today_change=-0.0567),
+            "INTC": SymbolMarketData(price=24.5, today_change=0.0),
+        },
+    )
+
+    assert "200.00" in lines[1]
+    assert "350.25" in lines[2]
+    assert "24.50" in lines[3]
+    assert lines[1].endswith(" +1.2%")
+    assert lines[2].endswith(" -5.7%")
+    assert lines[3].endswith(" +0.0%")
+
+
+def test_symbol_delta_sidebar_colors_positive_green_and_negative_red(monkeypatch) -> None:
+    monkeypatch.setattr(monitor_tui, "_safe_color_pair", lambda pair: pair * 10)
+
+    assert monitor_tui._net_delta_attr(6.0) == monitor_tui.COLOR_TAKE_PROFIT * 10
+    assert monitor_tui._net_delta_attr(-6.0) == monitor_tui.COLOR_STOP_LOSS * 10
+    assert monitor_tui._net_delta_attr(0.0) == curses.A_NORMAL
+    assert monitor_tui._net_delta_attr(None) == curses.A_NORMAL
+    assert monitor_tui._today_change_attr(0.012) == monitor_tui.COLOR_TAKE_PROFIT * 10
+    assert monitor_tui._today_change_attr(-0.012) == monitor_tui.COLOR_STOP_LOSS * 10
+    assert monitor_tui._today_change_attr(0.0001) == curses.A_NORMAL
+    assert monitor_tui._today_change_attr(None) == curses.A_NORMAL
+
+
+def test_today_change_pct_uses_quote_percent_and_previous_close_fallback() -> None:
+    assert today_change_pct_from_quote(
+        {"NVDA": {"quote": {"netPercentChange": 1.234}}},
+        "NVDA",
+    ) == 0.01234
+    assert today_change_pct_from_quote(
+        {"TSLA": {"lastPrice": 110, "previousClose": 100}},
+        "TSLA",
+    ) == 0.1
+    assert today_change_pct_from_quote({"INTC": {"lastPrice": 20}}, "INTC") is None
+
+
+def test_configured_symbol_today_changes_fetches_every_configured_symbol() -> None:
+    class Broker:
+        def get_quotes(self, symbols: list[str]) -> dict:
+            assert symbols == ["NVDA", "TSLA", "INTC"]
+            return {
+                "NVDA": {"netPercentChange": 1.5},
+                "TSLA": {"netPercentChange": -2.0},
+            }
+
+    changes = configured_symbol_today_changes(Broker(), ["nvda", "TSLA", "NVDA", "INTC"])
+
+    assert changes == {"NVDA": 0.015, "TSLA": -0.02, "INTC": None}
+
+
+def test_configured_symbol_market_data_includes_share_price_and_today_change() -> None:
+    class Broker:
+        def get_quotes(self, symbols: list[str]) -> dict:
+            assert symbols == ["NVDA", "TSLA"]
+            return {
+                "NVDA": {"lastPrice": 200.25, "netPercentChange": 1.5},
+                "TSLA": {"mark": 350.5, "previousClose": 360.0},
+            }
+
+    market_data = configured_symbol_market_data(Broker(), ["nvda", "TSLA", "NVDA"])
+
+    assert market_data == {
+        "NVDA": SymbolMarketData(price=200.25, today_change=0.015),
+        "TSLA": SymbolMarketData(price=350.5, today_change=-0.026389),
+    }
 
 
 def test_quote_ranges_accept_nested_fields() -> None:
@@ -698,7 +855,7 @@ def test_itm_marker_is_added_without_replacing_higher_priority_alert() -> None:
 
     assert row.alert == "STOP_LOSS"
     assert row.display_alert == "STOP_LOSS (ITM)"
-    assert "STOP_LOSS (ITM)" in _format_row(row)
+    assert "STOP (ITM)" in _format_row(row)
     assert "STOP (ITM)" in _format_row(row, width=100)
 
 

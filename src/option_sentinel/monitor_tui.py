@@ -23,14 +23,16 @@ from .persistence import Repository
 from .position_monitor import (
     AccountValueSummary,
     OptionMonitorRow,
+    SymbolMarketData,
     account_value_summary,
     apply_closing_order_flags,
     build_monitor_rows,
     build_monitor_snapshot,
+    configured_symbol_market_data,
     first_float,
     format_account_value_line,
     format_closing_order_flag,
-    format_optional_delta,
+    format_net_option_delta,
     format_optional_percent,
     format_optional_price,
     format_optional_signed_percent,
@@ -39,6 +41,7 @@ from .position_monitor import (
     format_today_pnl,
     format_total_theta,
     mark_from_quote,
+    net_option_deltas_by_symbol,
     total_today_pnl,
     total_position_theta,
     underlying_price_from_quote,
@@ -62,7 +65,8 @@ OPEN_CANDIDATE_LIMIT = 12
 OPEN_QUANTITY = 1
 OPEN_STRATEGIES = ("STRANGLE", "PUT", "CALL")
 ORDER_DRAFT_LIMIT = 100
-FULL_MONITOR_WIDTH = 138
+FULL_MONITOR_WIDTH = 108
+SYMBOL_DELTA_SIDEBAR_WIDTH = 32
 CHART_BLOCK_HEIGHT = 10
 CHART_REFRESH_SECONDS = 300
 REFRESH_MONITOR = "positions"
@@ -86,6 +90,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     selected = 0
     scroll = 0
     rows: list[OptionMonitorRow] = []
+    symbol_market_data: dict[str, SymbolMarketData] = {}
     status = "Loading positions..."
     account_status = "Total account value ... - Total day change ... - Current cash balance ..."
     order_selected = 0
@@ -119,7 +124,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                         status = f"Refresh failed: {completed.error}"
                     else:
                         last_order_refresh = completed_at
-                        rows, order_rows, live_status_note, account_summary = completed.value
+                        rows, order_rows, live_status_note, account_summary, symbol_market_data = completed.value
                         selected = min(selected, max(0, len(rows) - 1))
                         order_selected = min(order_selected, max(0, len(order_rows) - 1))
                         status = _monitor_status(rows, refreshed_at=refreshed_at)
@@ -206,6 +211,8 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                     _draw(
                         stdscr,
                         rows,
+                        symbols=config.symbols,
+                        market_data=symbol_market_data,
                         selected=selected,
                         scroll=scroll,
                         status=status,
@@ -378,11 +385,24 @@ def _build_monitor_rows_with_open_closing_orders(
     broker: Broker,
     config: AppConfig,
     repository: Repository,
-) -> tuple[list[OptionMonitorRow], list[OrderStatusRow], str | None, AccountValueSummary]:
+) -> tuple[
+    list[OptionMonitorRow],
+    list[OrderStatusRow],
+    str | None,
+    AccountValueSummary,
+    dict[str, SymbolMarketData],
+]:
     rows, account_summary = build_monitor_snapshot(broker, config)
+    market_data = configured_symbol_market_data(broker, config.symbols)
     order_rows, live_status_note = _refresh_todays_order_rows(broker=broker, repository=repository)
     closing_order_symbols = open_closing_order_symbols(order_rows)
-    return apply_closing_order_flags(rows, closing_order_symbols), order_rows, live_status_note, account_summary
+    return (
+        apply_closing_order_flags(rows, closing_order_symbols),
+        order_rows,
+        live_status_note,
+        account_summary,
+        market_data,
+    )
 
 
 def _refresh_todays_order_rows(*, broker: Broker, repository: Repository) -> tuple[list[OrderStatusRow], str | None]:
@@ -434,6 +454,8 @@ def _draw(
     stdscr: curses.window,
     rows: list[OptionMonitorRow],
     *,
+    symbols: list[str],
+    market_data: dict[str, SymbolMarketData],
     selected: int,
     scroll: int,
     status: str,
@@ -455,8 +477,9 @@ def _draw(
     _add_line(stdscr, 1, 0, status, width)
     _add_line(stdscr, 2, 0, account_status, width)
 
-    header = _format_monitor_header(width=width)
-    _add_line(stdscr, 4, 0, header, width, curses.A_UNDERLINE)
+    table_width = max(1, width - SYMBOL_DELTA_SIDEBAR_WIDTH)
+    header = _format_monitor_header(width=table_width)
+    _add_line(stdscr, 4, 0, header, table_width, curses.A_UNDERLINE)
 
     visible_rows = max(1, height - 6)
     if not rows:
@@ -465,13 +488,113 @@ def _draw(
         for screen_index, row in enumerate(rows[scroll : scroll + visible_rows], start=5):
             absolute_index = scroll + screen_index - 5
             attr = _monitor_row_attr(row, selected=absolute_index == selected)
-            _add_line(stdscr, screen_index, 0, _format_row(row, width=width), width, attr)
+            _add_line(stdscr, screen_index, 0, _format_row(row, width=table_width), table_width, attr)
+
+    _draw_symbol_delta_sidebar(
+        stdscr,
+        rows,
+        symbols=symbols,
+        market_data=market_data,
+        x=table_width,
+        height=height,
+        width=SYMBOL_DELTA_SIDEBAR_WIDTH,
+    )
 
     _draw_tab_bar(stdscr, active_tab=active_tab)
     stdscr.refresh()
 
     if popup and rows:
         _draw_popup(stdscr, rows[selected], popup_selected=popup_selected)
+
+
+def _draw_symbol_delta_sidebar(
+    stdscr: curses.window,
+    rows: list[OptionMonitorRow],
+    *,
+    symbols: list[str],
+    market_data: dict[str, SymbolMarketData],
+    x: int,
+    height: int,
+    width: int,
+) -> None:
+    if width < 4 or height <= 5:
+        return
+
+    try:
+        for y in range(3, height - 1):
+            stdscr.addch(y, x, curses.ACS_VLINE)
+    except curses.error:
+        pass
+
+    content_x = x + 2
+    content_width = max(1, width - 2)
+    symbol_deltas = net_option_deltas_by_symbol(rows, symbols)
+    deltas = list(symbol_deltas.values())
+    changes = [
+        market_data.get(symbol).today_change if symbol in market_data else None
+        for symbol in symbol_deltas
+    ]
+    lines = _format_symbol_delta_sidebar(rows, symbols, market_data=market_data)
+    max_lines = max(1, height - 5)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = "..."
+    for offset, line in enumerate(lines):
+        attr = curses.A_UNDERLINE if offset == 0 else curses.A_NORMAL
+        try:
+            stdscr.addnstr(4 + offset, content_x, line, content_width, attr)
+            if offset > 0 and line != "...":
+                delta_attr = _net_delta_attr(deltas[offset - 1])
+                stdscr.addnstr(4 + offset, content_x, line[:6], 6, delta_attr)
+                stdscr.addnstr(4 + offset, content_x + 16, line[16:23], 7, delta_attr)
+                stdscr.addnstr(
+                    4 + offset,
+                    content_x + content_width - 6,
+                    line[-6:],
+                    6,
+                    _today_change_attr(changes[offset - 1]),
+                )
+        except curses.error:
+            pass
+
+
+def _format_symbol_delta_sidebar(
+    rows: list[OptionMonitorRow],
+    symbols: list[str],
+    *,
+    market_data: dict[str, SymbolMarketData] | None = None,
+) -> list[str]:
+    lines = [f"{'Symbol':<6} {'Price':>8} {'Net Δ':>7} {'Today':>6}"]
+    symbols_data = market_data or {}
+    for symbol, delta in net_option_deltas_by_symbol(rows, symbols).items():
+        compact_delta = format_net_option_delta(delta).replace(" ", "")
+        data = symbols_data.get(symbol)
+        price = format_optional_price(data.price if data is not None else None)
+        today_change = format_optional_signed_percent(data.today_change if data is not None else None)
+        lines.append(f"{symbol[:6]:<6} {price:>8} {compact_delta:>7} {today_change:>6}")
+    return lines
+
+
+def _net_delta_attr(delta: float | None) -> int:
+    if delta is None:
+        return curses.A_NORMAL
+    rounded = round(delta, 1)
+    if rounded > 0:
+        return _safe_color_pair(COLOR_TAKE_PROFIT)
+    if rounded < 0:
+        return _safe_color_pair(COLOR_STOP_LOSS)
+    return curses.A_NORMAL
+
+
+def _today_change_attr(change: float | None) -> int:
+    if change is None:
+        return curses.A_NORMAL
+    displayed_percent = round(change * 100, 1)
+    if displayed_percent > 0:
+        return _safe_color_pair(COLOR_TAKE_PROFIT)
+    if displayed_percent < 0:
+        return _safe_color_pair(COLOR_STOP_LOSS)
+    return curses.A_NORMAL
 
 
 def _monitor_status(rows: list[OptionMonitorRow], *, refreshed_at: datetime | None = None) -> str:
@@ -657,18 +780,15 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
     position = row.position
     return _format_columns(
         position.underlying_symbol,
-        format_optional_price(row.underlying_price),
         f"{position.option_type[0]} {position.strike:g}",
         format_position_quantity(position),
         str(row.dte),
-        format_optional_delta(row.delta),
         format_optional_price(row.mark),
         format_optional_percent(row.pop),
         format_optional_signed_percent(row.day_pnl_pct),
         format_optional_signed_percent(row.pnl_pct),
         format_range_meter(row.day_range, width=_monitor_meter_width(width)),
         format_range_meter(row.day30_range, width=_monitor_meter_width(width)),
-        format_range_meter(row.week52_range, width=_monitor_meter_width(width)),
         row.display_alert,
         format_closing_order_flag(row.has_closing_order),
         width=width,
@@ -678,20 +798,17 @@ def _format_row(row: OptionMonitorRow, *, width: int | None = None) -> str:
 def _format_monitor_header(*, width: int | None = None) -> str:
     return _format_columns(
         "Symbol",
-        "Price",
         "Option",
         "Qty",
         "DTE",
-        "Delta",
         "Mid",
         "POP",
         "P/L Day %",
         "P/L %",
         "Day",
         "30D",
-        "52W",
         "Alert",
-        "Closing",
+        "Cls",
         width=width,
         header=True,
     )
@@ -699,70 +816,58 @@ def _format_monitor_header(*, width: int | None = None) -> str:
 
 def _format_columns(
     symbol: str,
-    ticker_price: str,
     option: str,
     qty: str,
     dte: str,
-    delta: str,
     mid: str,
     pop: str,
     day_pnl: str,
     pnl: str,
     day: str,
     day30: str,
-    week52: str,
     alert: str,
     closing: str,
     *,
     width: int | None = None,
     header: bool = False,
 ) -> str:
+    alert = _compact_alert(alert)
     if width is not None and width < FULL_MONITOR_WIDTH:
-        alert = _compact_alert(alert)
-        closing = "Close" if closing == "Closing" else closing
         meter_width = _monitor_meter_width(width)
         qty_width = 2 if width < 107 else 3
         if header and qty_width == 2:
             qty = "Q"
         day_column = f"{day:^{meter_width}}" if header else f"{day:>{meter_width}}"
         day30_column = f"{day30:^{meter_width}}" if header else f"{day30:>{meter_width}}"
-        week52_column = f"{week52:^{meter_width}}" if header else f"{week52:>{meter_width}}"
         return (
             f"{symbol:<6} "
-            f"{ticker_price:>6} "
             f"{option:<6} "
             f"{qty:>{qty_width}} "
             f"{dte:>3} "
-            f"{delta:>5} "
             f"{mid:>6} "
             f"{pop:>4} "
             f"{day_pnl:>9} "
             f"{pnl:>7} "
             f"{day_column} "
             f"{day30_column} "
-            f"{week52_column} "
             f"{alert:<12} "
-            f"{closing:<5}"
+            f"{closing:^3}"
         )
     day_column = f"{day:^11}" if header else f"{day:>11}"
     day30_column = f"{day30:^11}" if header else f"{day30:>11}"
-    week52_column = f"{week52:^11}" if header else f"{week52:>11}"
     return (
         f"{symbol:<6} "
-        f"{ticker_price:>6} "
         f"{option:<8} "
         f"{qty:>3} "
         f"{dte:>4} "
-        f"{delta:>6} "
         f"{mid:>7} "
         f"{pop:>5} "
         f"{day_pnl:>9} "
         f"{pnl:>9} "
         f"{day_column} "
         f"{day30_column} "
-        f"{week52_column} "
-        f"{alert:<21} "
-        f"{closing:<7}"
+        f"{alert:<12} "
+        f"{closing:^3}"
     )
 
 
