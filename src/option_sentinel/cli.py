@@ -37,6 +37,8 @@ from .position_monitor import (
     format_today_pnl,
     format_total_theta,
     net_option_deltas_by_symbol,
+    share_account_percentages,
+    symbols_by_share_account_percentage,
     total_today_pnl,
     total_position_theta,
 )
@@ -393,7 +395,8 @@ def monitor(
         return
 
     def render() -> Columns:
-        rows, account_summary = build_monitor_snapshot(broker, config)
+        account = broker.get_account()
+        rows, account_summary = build_monitor_snapshot(broker, config, account=account)
         order_drafts = repository.list_order_drafts(only_today=True)
         order_rows, _ = refresh_order_status_rows(order_drafts, broker, repository)
         rows = apply_closing_order_flags(rows, open_closing_order_symbols(order_rows))
@@ -443,8 +446,16 @@ def monitor(
         delta_table.add_column("Price", justify="right")
         delta_table.add_column("Net Δ", justify="right")
         delta_table.add_column("Today", justify="right")
+        delta_table.add_column("Acct%", justify="right")
         market_data = configured_symbol_market_data(broker, config.symbols)
-        for symbol, delta in net_option_deltas_by_symbol(rows, config.symbols).items():
+        share_percentages = share_account_percentages(
+            broker,
+            config.symbols,
+            account=account,
+            market_data=market_data,
+        )
+        sorted_symbols = symbols_by_share_account_percentage(config.symbols, share_percentages)
+        for symbol, delta in net_option_deltas_by_symbol(rows, sorted_symbols).items():
             rounded = round(delta, 1) if delta is not None else 0.0
             style = "green" if rounded > 0 else "red" if rounded < 0 else None
             symbol_data = market_data.get(symbol)
@@ -461,6 +472,7 @@ def monitor(
                 format_optional_price(symbol_data.price if symbol_data is not None else None),
                 Text(format_net_option_delta(delta), style=style),
                 Text(format_optional_signed_percent(today_change), style=today_style),
+                "-" if share_percentages.get(symbol) is None else f"{share_percentages[symbol]:.1f}%",
             )
         return Columns((table, delta_table), expand=True)
 

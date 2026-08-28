@@ -66,15 +66,18 @@ def build_monitor_rows(broker: Broker, config: AppConfig) -> list[OptionMonitorR
 def build_monitor_snapshot(
     broker: Broker,
     config: AppConfig,
+    *,
+    account: dict[str, Any] | None = None,
 ) -> tuple[list[OptionMonitorRow], AccountValueSummary]:
-    get_account = getattr(broker, "get_account", None)
-    if not callable(get_account):
-        return build_monitor_rows(broker, config), AccountValueSummary(
-            total_value=None,
-            day_change=None,
-            cash_balance=None,
-        )
-    account = get_account()
+    if account is None:
+        get_account = getattr(broker, "get_account", None)
+        if not callable(get_account):
+            return build_monitor_rows(broker, config), AccountValueSummary(
+                total_value=None,
+                day_change=None,
+                cash_balance=None,
+            )
+        account = get_account()
     securities_account = account.get("securitiesAccount", account)
     raw_positions = securities_account.get("positions") if isinstance(securities_account, dict) else None
     if not isinstance(raw_positions, list):
@@ -254,6 +257,98 @@ def configured_symbol_market_data(
         )
         for symbol in normalized_symbols
     }
+
+
+def share_account_percentages(
+    broker: Broker,
+    symbols: list[str],
+    *,
+    account: dict[str, Any] | None = None,
+    market_data: dict[str, SymbolMarketData] | None = None,
+) -> dict[str, float | None]:
+    """Return each configured symbol's equity-share value as a percent of the account."""
+
+    choices = list(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip()))
+    if account is None:
+        get_account = getattr(broker, "get_account", None)
+        if not callable(get_account):
+            return {symbol: None for symbol in choices}
+        account_data = get_account()
+    else:
+        account_data = account
+    total_value = account_value_summary(account_data).total_value
+    if total_value is None or total_value <= 0:
+        return {symbol: None for symbol in choices}
+
+    securities_account = account_data.get("securitiesAccount", account_data)
+    raw_positions = securities_account.get("positions") if isinstance(securities_account, dict) else None
+    positions = raw_positions if isinstance(raw_positions, list) else broker.get_positions()
+    share_quantities: dict[str, float] = {}
+    market_values: dict[str, float] = {}
+    symbols_needing_prices: set[str] = set()
+    wanted = set(choices)
+
+    for position in positions:
+        instrument = position.get("instrument") or {}
+        asset_type = str(instrument.get("assetType") or position.get("assetType") or "").upper()
+        symbol = str(instrument.get("symbol") or position.get("symbol") or "").strip().upper()
+        if asset_type != "EQUITY" or symbol not in wanted:
+            continue
+        shares = first_float(position.get("longQuantity"), position.get("long_quantity")) or 0.0
+        if shares <= 0:
+            continue
+        share_quantities[symbol] = share_quantities.get(symbol, 0.0) + shares
+        market_value = first_float(position.get("marketValue"), position.get("market_value"))
+        if market_value is None:
+            symbols_needing_prices.add(symbol)
+        else:
+            market_values[symbol] = market_values.get(symbol, 0.0) + market_value
+
+    if symbols_needing_prices:
+        if market_data is None:
+            quotes = broker.get_quotes(sorted(symbols_needing_prices))
+            prices = {
+                symbol: underlying_price_from_quote(quotes, symbol)
+                for symbol in symbols_needing_prices
+            }
+        else:
+            prices = {
+                symbol: market_data.get(symbol).price if symbol in market_data else None
+                for symbol in symbols_needing_prices
+            }
+        for symbol, price in prices.items():
+            if price is not None:
+                market_values[symbol] = share_quantities[symbol] * price
+            else:
+                market_values.pop(symbol, None)
+
+    percentages: dict[str, float | None] = {}
+    for symbol in choices:
+        if symbol not in share_quantities:
+            percentages[symbol] = 0.0
+        elif symbol not in market_values:
+            percentages[symbol] = None
+        else:
+            percentages[symbol] = round(market_values[symbol] / total_value * 100, 4)
+    return percentages
+
+
+def symbols_by_share_account_percentage(
+    symbols: list[str],
+    percentages: dict[str, float | None],
+) -> list[str]:
+    """Sort configured symbols by known share allocation, highest first."""
+
+    normalized = list(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip()))
+    original_order = {symbol: index for index, symbol in enumerate(normalized)}
+    return sorted(
+        normalized,
+        key=lambda symbol: (
+            percentages.get(symbol) is None,
+            -(percentages.get(symbol) or 0.0),
+            original_order[symbol],
+        ),
+    )
 
 
 def configured_symbol_today_changes(

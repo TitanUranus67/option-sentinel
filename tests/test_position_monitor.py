@@ -481,7 +481,7 @@ def test_net_option_deltas_combine_side_quantity_and_contract_multiplier() -> No
 def test_symbol_delta_sidebar_lists_every_configured_symbol() -> None:
     lines = _format_symbol_delta_sidebar([], ["nvda", "TSLA", "NVDA", "INTC"])
 
-    assert lines[0] == "Symbol    Price   Net Δ  Today"
+    assert lines[0] == "Symbol    Price   Net Δ  Today  Acct%"
     assert [line.split()[0] for line in lines[1:]] == ["NVDA", "TSLA", "INTC"]
     assert all("+0.0·" in line for line in lines[1:])
     assert all(line.endswith("     -") for line in lines[1:])
@@ -501,9 +501,25 @@ def test_symbol_delta_sidebar_shows_today_change_percentage() -> None:
     assert "200.00" in lines[1]
     assert "350.25" in lines[2]
     assert "24.50" in lines[3]
-    assert lines[1].endswith(" +1.2%")
-    assert lines[2].endswith(" -5.7%")
-    assert lines[3].endswith(" +0.0%")
+    assert lines[1].split()[-2] == "+1.2%"
+    assert lines[2].split()[-2] == "-5.7%"
+    assert lines[3].split()[-2] == "+0.0%"
+
+
+def test_symbol_delta_sidebar_shows_account_share_percentage_and_sorts_highest_first() -> None:
+    lines = _format_symbol_delta_sidebar(
+        [],
+        ["NVDA", "TSLA", "INTC", "RKLB"],
+        share_account_percentages={
+            "NVDA": 12.345,
+            "TSLA": 25.0,
+            "INTC": 0.0,
+            "RKLB": None,
+        },
+    )
+
+    assert [line.split()[0] for line in lines[1:]] == ["TSLA", "NVDA", "INTC", "RKLB"]
+    assert [line.split()[-1] for line in lines[1:]] == ["25.0%", "12.3%", "0.0%", "-"]
 
 
 def test_symbol_delta_sidebar_colors_positive_green_and_negative_red(monkeypatch) -> None:

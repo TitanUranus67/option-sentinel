@@ -24,12 +24,10 @@ from .position_monitor import (
     AccountValueSummary,
     OptionMonitorRow,
     SymbolMarketData,
-    account_value_summary,
     apply_closing_order_flags,
     build_monitor_rows,
     build_monitor_snapshot,
     configured_symbol_market_data,
-    first_float,
     format_account_value_line,
     format_closing_order_flag,
     format_net_option_delta,
@@ -42,9 +40,10 @@ from .position_monitor import (
     format_total_theta,
     mark_from_quote,
     net_option_deltas_by_symbol,
+    share_account_percentages as _share_account_percentages,
+    symbols_by_share_account_percentage,
     total_today_pnl,
     total_position_theta,
-    underlying_price_from_quote,
 )
 from .refresh import BrokerRefreshCoordinator
 from .risk import validate_new_option_trade, validate_new_trade
@@ -66,7 +65,7 @@ OPEN_QUANTITY = 1
 OPEN_STRATEGIES = ("STRANGLE", "PUT", "CALL")
 ORDER_DRAFT_LIMIT = 100
 FULL_MONITOR_WIDTH = 108
-SYMBOL_DELTA_SIDEBAR_WIDTH = 32
+SYMBOL_DELTA_SIDEBAR_WIDTH = 39
 CHART_BLOCK_HEIGHT = 10
 CHART_REFRESH_SECONDS = 300
 REFRESH_MONITOR = "positions"
@@ -91,6 +90,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     scroll = 0
     rows: list[OptionMonitorRow] = []
     symbol_market_data: dict[str, SymbolMarketData] = {}
+    symbol_share_account_percentages: dict[str, float | None] = {}
     status = "Loading positions..."
     account_status = "Total account value ... - Total day change ... - Current cash balance ..."
     order_selected = 0
@@ -124,7 +124,14 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                         status = f"Refresh failed: {completed.error}"
                     else:
                         last_order_refresh = completed_at
-                        rows, order_rows, live_status_note, account_summary, symbol_market_data = completed.value
+                        (
+                            rows,
+                            order_rows,
+                            live_status_note,
+                            account_summary,
+                            symbol_market_data,
+                            symbol_share_account_percentages,
+                        ) = completed.value
                         selected = min(selected, max(0, len(rows) - 1))
                         order_selected = min(order_selected, max(0, len(order_rows) - 1))
                         status = _monitor_status(rows, refreshed_at=refreshed_at)
@@ -213,6 +220,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                         rows,
                         symbols=config.symbols,
                         market_data=symbol_market_data,
+                        share_account_percentages=symbol_share_account_percentages,
                         selected=selected,
                         scroll=scroll,
                         status=status,
@@ -391,9 +399,18 @@ def _build_monitor_rows_with_open_closing_orders(
     str | None,
     AccountValueSummary,
     dict[str, SymbolMarketData],
+    dict[str, float | None],
 ]:
-    rows, account_summary = build_monitor_snapshot(broker, config)
+    get_account = getattr(broker, "get_account", None)
+    account = get_account() if callable(get_account) else None
+    rows, account_summary = build_monitor_snapshot(broker, config, account=account)
     market_data = configured_symbol_market_data(broker, config.symbols)
+    share_percentages = _share_account_percentages(
+        broker,
+        config.symbols,
+        account=account,
+        market_data=market_data,
+    )
     order_rows, live_status_note = _refresh_todays_order_rows(broker=broker, repository=repository)
     closing_order_symbols = open_closing_order_symbols(order_rows)
     return (
@@ -402,6 +419,7 @@ def _build_monitor_rows_with_open_closing_orders(
         live_status_note,
         account_summary,
         market_data,
+        share_percentages,
     )
 
 
@@ -456,6 +474,7 @@ def _draw(
     *,
     symbols: list[str],
     market_data: dict[str, SymbolMarketData],
+    share_account_percentages: dict[str, float | None],
     selected: int,
     scroll: int,
     status: str,
@@ -495,6 +514,7 @@ def _draw(
         rows,
         symbols=symbols,
         market_data=market_data,
+        share_account_percentages=share_account_percentages,
         x=table_width,
         height=height,
         width=SYMBOL_DELTA_SIDEBAR_WIDTH,
@@ -513,6 +533,7 @@ def _draw_symbol_delta_sidebar(
     *,
     symbols: list[str],
     market_data: dict[str, SymbolMarketData],
+    share_account_percentages: dict[str, float | None],
     x: int,
     height: int,
     width: int,
@@ -528,13 +549,19 @@ def _draw_symbol_delta_sidebar(
 
     content_x = x + 2
     content_width = max(1, width - 2)
-    symbol_deltas = net_option_deltas_by_symbol(rows, symbols)
+    sorted_symbols = symbols_by_share_account_percentage(symbols, share_account_percentages)
+    symbol_deltas = net_option_deltas_by_symbol(rows, sorted_symbols)
     deltas = list(symbol_deltas.values())
     changes = [
         market_data.get(symbol).today_change if symbol in market_data else None
         for symbol in symbol_deltas
     ]
-    lines = _format_symbol_delta_sidebar(rows, symbols, market_data=market_data)
+    lines = _format_symbol_delta_sidebar(
+        rows,
+        symbols,
+        market_data=market_data,
+        share_account_percentages=share_account_percentages,
+    )
     max_lines = max(1, height - 5)
     if len(lines) > max_lines:
         lines = lines[:max_lines]
@@ -549,8 +576,8 @@ def _draw_symbol_delta_sidebar(
                 stdscr.addnstr(4 + offset, content_x + 16, line[16:23], 7, delta_attr)
                 stdscr.addnstr(
                     4 + offset,
-                    content_x + content_width - 6,
-                    line[-6:],
+                    content_x + 24,
+                    line[24:30],
                     6,
                     _today_change_attr(changes[offset - 1]),
                 )
@@ -563,15 +590,22 @@ def _format_symbol_delta_sidebar(
     symbols: list[str],
     *,
     market_data: dict[str, SymbolMarketData] | None = None,
+    share_account_percentages: dict[str, float | None] | None = None,
 ) -> list[str]:
-    lines = [f"{'Symbol':<6} {'Price':>8} {'Net Δ':>7} {'Today':>6}"]
+    percentages = share_account_percentages or {}
+    sorted_symbols = symbols_by_share_account_percentage(symbols, percentages)
+    lines = [f"{'Symbol':<6} {'Price':>8} {'Net Δ':>7} {'Today':>6} {'Acct%':>6}"]
     symbols_data = market_data or {}
-    for symbol, delta in net_option_deltas_by_symbol(rows, symbols).items():
+    for symbol, delta in net_option_deltas_by_symbol(rows, sorted_symbols).items():
         compact_delta = format_net_option_delta(delta).replace(" ", "")
         data = symbols_data.get(symbol)
         price = format_optional_price(data.price if data is not None else None)
         today_change = format_optional_signed_percent(data.today_change if data is not None else None)
-        lines.append(f"{symbol[:6]:<6} {price:>8} {compact_delta:>7} {today_change:>6}")
+        account_percentage = percentages.get(symbol)
+        account_text = "-" if account_percentage is None else f"{account_percentage:.1f}%"
+        lines.append(
+            f"{symbol[:6]:<6} {price:>8} {compact_delta:>7} {today_change:>6} {account_text:>6}"
+        )
     return lines
 
 
@@ -1567,57 +1601,6 @@ def _open_position_counts_by_symbol(rows: list[OptionMonitorRow]) -> dict[str, i
         if symbol:
             counts[symbol] = counts.get(symbol, 0) + max(0, row.position.quantity)
     return counts
-
-
-def _share_account_percentages(broker: Broker, symbols: list[str]) -> dict[str, float | None]:
-    choices = _configured_stock_symbols(symbols)
-    account = broker.get_account()
-    total_value = account_value_summary(account).total_value
-    if total_value is None or total_value <= 0:
-        return {symbol: None for symbol in choices}
-
-    securities_account = account.get("securitiesAccount", account)
-    raw_positions = securities_account.get("positions") if isinstance(securities_account, dict) else None
-    positions = raw_positions if isinstance(raw_positions, list) else broker.get_positions()
-    share_quantities: dict[str, float] = {}
-    market_values: dict[str, float] = {}
-    symbols_needing_quotes: set[str] = set()
-    wanted = set(choices)
-
-    for position in positions:
-        instrument = position.get("instrument") or {}
-        asset_type = str(instrument.get("assetType") or position.get("assetType") or "").upper()
-        symbol = str(instrument.get("symbol") or position.get("symbol") or "").strip().upper()
-        if asset_type != "EQUITY" or symbol not in wanted:
-            continue
-        shares = first_float(position.get("longQuantity"), position.get("long_quantity")) or 0.0
-        if shares <= 0:
-            continue
-        share_quantities[symbol] = share_quantities.get(symbol, 0.0) + shares
-        market_value = first_float(position.get("marketValue"), position.get("market_value"))
-        if market_value is None:
-            symbols_needing_quotes.add(symbol)
-        else:
-            market_values[symbol] = market_values.get(symbol, 0.0) + market_value
-
-    if symbols_needing_quotes:
-        quotes = broker.get_quotes(sorted(symbols_needing_quotes))
-        for symbol in symbols_needing_quotes:
-            price = underlying_price_from_quote(quotes, symbol)
-            if price is not None:
-                market_values[symbol] = share_quantities[symbol] * price
-            else:
-                market_values.pop(symbol, None)
-
-    percentages: dict[str, float | None] = {}
-    for symbol in choices:
-        if symbol not in share_quantities:
-            percentages[symbol] = 0.0
-        elif symbol not in market_values:
-            percentages[symbol] = None
-        else:
-            percentages[symbol] = round(market_values[symbol] / total_value * 100, 4)
-    return percentages
 
 
 def _select_open_strategy(stdscr: curses.window) -> str | None:
