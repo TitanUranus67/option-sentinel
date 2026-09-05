@@ -245,3 +245,36 @@ def test_replacement_gateway_timeout_preserves_uncertainty(repo, candidate):
     assert unresolved_unknown_open_order_count(repo) == 1
     refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
     assert pending_open_option_position_count(repo) == 1
+
+
+def test_assignment_limit_includes_existing_puts(repo, candidate):
+    positions = [{
+        "instrument": {"symbol": candidate.option.symbol, "assetType": "OPTION"},
+        "shortQuantity": 5, "averagePrice": 1.05,
+    }]
+    result = validate_new_option_trade(
+        candidate, quantity=1, config=AppConfig(), repository=repo, positions=positions,
+    )
+    assert not result.allowed, "Existing $40,000 plus new $8,000 exceeds $40,000 cap"
+
+
+@pytest.mark.parametrize("status,blocked", [("WORKING", True), ("CANCELED", False), ("FILLED", False), ("REPLACED", False)])
+def test_assignment_limit_reserves_pending_puts(repo, candidate, status, blocked):
+    repo.add_order_draft(draft(candidate, broker_status=status))
+    config = AppConfig()
+    config.risk.max_new_trades_per_day = 10
+    config.risk.max_assignment_capital_per_symbol = 12_000
+    result = validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=[])
+    assert result.allowed is not blocked
+
+
+def test_assignment_capital_is_scoped_to_symbol_and_short_puts(repo, candidate):
+    positions = [
+        {"instrument": {"symbol": f"OTHER_{candidate.expiration:%y%m%d}P80", "assetType": "OPTION"}, "shortQuantity": 10},
+        {"instrument": {"symbol": candidate.option.symbol, "assetType": "OPTION"}, "longQuantity": 10},
+    ]
+    config = AppConfig()
+    config.risk.max_option_positions = 100
+    config.risk.max_assignment_capital_per_symbol = 8_000
+    result = validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=positions)
+    assert result.allowed

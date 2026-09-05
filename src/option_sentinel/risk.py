@@ -104,6 +104,28 @@ def submitted_open_order_count(repository: Repository) -> int:
     return sum(1 for draft in _submitted_open_order_drafts(repository) if _counts_as_new_trade(draft))
 
 
+def reserved_put_assignment_capital(
+    positions: list[dict[str, Any]], repository: Repository, symbol: str,
+) -> float:
+    raw_positions = list(positions)
+    for draft in _submitted_open_order_drafts(repository):
+        if not _is_pending_open_order(draft):
+            continue
+        for leg in draft.order_json.get("orderLegCollection") or []:
+            if isinstance(leg, dict) and str(leg.get("instruction") or "").upper() == "SELL_TO_OPEN":
+                raw_positions.append({
+                    "instrument": leg.get("instrument") or {},
+                    "shortQuantity": leg.get("quantity"),
+                })
+    return sum(
+        position.strike * position.quantity * 100
+        for raw in raw_positions
+        if (position := parse_option_position(raw)) is not None
+        and position.side == "SHORT" and position.option_type == "PUT"
+        and position.underlying_symbol == symbol.strip().upper()
+    )
+
+
 def unresolved_unknown_open_order_count(repository: Repository) -> int:
     return sum(
         1
@@ -280,8 +302,14 @@ def _validate_new_open(
             f"(live: {live_option_positions}{pending_breakdown}, new: {new_option_positions}, "
             f"total: {total_option_positions}, limit: {config.risk.max_option_positions})"
         )
-    if assignment_capital > config.risk.max_assignment_capital_per_symbol:
-        messages.append("max_assignment_capital_per_symbol would be exceeded")
+    reserved_assignment_capital = reserved_put_assignment_capital(positions, repository, symbol)
+    total_assignment_capital = reserved_assignment_capital + assignment_capital
+    if put_strike is not None and total_assignment_capital > config.risk.max_assignment_capital_per_symbol:
+        messages.append(
+            "max_assignment_capital_per_symbol would be exceeded "
+            f"(live and pending: {reserved_assignment_capital:,.2f}, new: {assignment_capital:,.2f}, "
+            f"total: {total_assignment_capital:,.2f}, limit: {config.risk.max_assignment_capital_per_symbol:,.2f})"
+        )
     if includes_call and not config.risk.allow_naked_calls and not call_covered:
         messages.append(
             "call leg is not covered and allow_naked_calls is false "
