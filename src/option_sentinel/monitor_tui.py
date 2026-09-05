@@ -1109,6 +1109,7 @@ def _adjust_order_price_with_confirmation(
 
     try:
         response = replace_order(broker_order_id, adjusted_order)
+        rejection_message = broker_rejection_message(response)
     except Exception as exc:
         repository.update_order_status(draft_id, "UNKNOWN")
         if row.draft.id is not None:
@@ -1118,7 +1119,6 @@ def _adjust_order_price_with_confirmation(
             "Check Schwab order status before retrying."
         )
 
-    rejection_message = broker_rejection_message(response)
     if rejection_message is not None:
         repository.update_order_status(draft_id, "REJECTED")
         return f"Adjust not placed: {rejection_message}"
