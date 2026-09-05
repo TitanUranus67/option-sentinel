@@ -6,7 +6,8 @@ from datetime import date, timedelta
 from .broker import Broker
 from .config import AppConfig
 from .models import OptionContract
-from .position_monitor import OptionMonitorRow, first_float, quote_for
+from .position_monitor import OptionMonitorRow
+from .quotes import first_float, quote_for
 from .strategy import bid_ask_spread_pct, days_to_expiration
 
 

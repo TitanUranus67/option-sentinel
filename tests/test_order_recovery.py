@@ -1,36 +1,16 @@
 from datetime import date, datetime, timedelta, timezone
 
-
 import pytest
 
-
 from option_sentinel.brokers.fake_broker import FakeBroker
-
-
 from option_sentinel.charts import build_intraday_charts
-
-
 from option_sentinel.config import AppConfig
-
-
 from option_sentinel.models import CandidateShortOption, OptionContract, OrderDraft
-
-
 from option_sentinel.monitor_tui import _adjust_order_price_with_confirmation
-
-
 from option_sentinel.order_status import _query_window, refresh_order_status_rows, order_drafts_for_refresh
-
-
 from option_sentinel.orders import build_open_option_order
-
-
 from option_sentinel.persistence import Repository
-
-
 from option_sentinel.position_monitor import build_monitor_rows
-
-
 from option_sentinel.risk import (
     pending_open_option_position_count,
     unresolved_unknown_open_order_count,
@@ -38,10 +18,7 @@ from option_sentinel.risk import (
     submitted_open_order_count,
     broker_stop_risk,
 )
-
-
-from option_sentinel.trading import draft_or_submit_order
-from option_sentinel.trading import OrderOutcomeUnknownError
+from option_sentinel.trading import OrderOutcomeUnknownError, draft_or_submit_order
 
 
 @pytest.fixture
@@ -387,3 +364,24 @@ def test_stop_risk_counts_mixed_short_quantities_without_pairing(candidate):
         {"instrument": {"symbol": candidate.option.symbol, "assetType": "OPTION"}, "longQuantity": 9, "averagePrice": 5},
     ]
     assert broker_stop_risk(positions, stop_multiple=3) == 1_600
+
+
+def test_rejected_replacement_preserves_original_working_order(repo, candidate):
+    class Broker(FakeBroker):
+        def replace_order(self, order_id, spec):
+            return {"status_code": 400, "body": "invalid replacement"}
+
+    broker = Broker()
+    submit(repo, candidate, broker)
+    rows, _ = refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    config = AppConfig()
+    config.risk.dry_run = False
+    message = _adjust_order_price_with_confirmation(
+        None, rows[0], 1.10, config=config, broker=broker, repository=repo,
+        confirm_func=lambda *_: True,
+    )
+    assert message.startswith("Adjust not placed: Broker rejected")
+    original, replacement = sorted(repo.list_order_drafts(), key=lambda d: d.id)
+    assert original.broker_status == "WORKING"
+    assert replacement.status == "REJECTED"
+    assert pending_open_option_position_count(repo) == 1

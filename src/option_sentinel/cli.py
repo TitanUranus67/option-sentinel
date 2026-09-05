@@ -43,6 +43,11 @@ from .position_monitor import (
     total_today_pnl,
     total_position_theta,
 )
+from .quotes import (
+    earnings_date_from_quotes as _earnings_date,
+    first_float as _first_float,
+    quote_for as _quote_for,
+)
 from .risk import validate_new_trade
 from .schwab_auth import is_schwab_auth_error, run_schwab_oauth
 from .strategy import find_candidate_strangle
@@ -137,27 +142,6 @@ def _reauthenticate_schwab(config: AppConfig, *, config_base: Path) -> Broker:
     return SchwabBroker.from_config(config, config_base=config_base)
 
 
-def _first_float(*values: Any) -> float | None:
-    for value in values:
-        if value is None:
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _quote_for(quotes: dict[str, Any], symbol: str) -> dict[str, Any]:
-    normalized = symbol.upper()
-    quote = quotes.get(normalized) or quotes.get(symbol) or {}
-    if isinstance(quote, dict) and "quote" in quote and isinstance(quote["quote"], dict):
-        merged = dict(quote)
-        merged.update(quote["quote"])
-        return merged
-    return quote if isinstance(quote, dict) else {}
-
-
 def _bid_ask_from_quote(quotes: dict[str, Any], symbol: str) -> tuple[float, float]:
     quote = _quote_for(quotes, symbol)
     bid = _first_float(quote.get("bidPrice"), quote.get("bid"), quote.get("bidprice"))
@@ -169,19 +153,6 @@ def _bid_ask_from_quote(quotes: dict[str, Any], symbol: str) -> tuple[float, flo
         bid = mark
         ask = mark
     return bid, ask
-
-
-def _earnings_date(quotes: dict[str, Any], symbol: str) -> date | None:
-    quote = _quote_for(quotes, symbol)
-    raw = quote.get("earningsDate") or quote.get("nextEarningsDate")
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return datetime.fromtimestamp(float(raw) / 1000 if raw > 10_000_000_000 else float(raw)).date()
-    try:
-        return date.fromisoformat(str(raw)[:10])
-    except ValueError:
-        return None
 
 
 def _candidate_for_symbol(config: AppConfig, broker: Broker, symbol: str) -> CandidateStrangle:

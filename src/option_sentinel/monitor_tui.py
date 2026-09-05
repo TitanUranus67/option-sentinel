@@ -15,7 +15,6 @@ from .config import AppConfig
 from .models import CandidateShortOption, CandidateStrangle, OrderDraft
 from .order_status import (
     OrderStatusRow,
-    broker_order_id_from_response,
     open_closing_order_symbols,
     order_drafts_for_refresh,
     refresh_order_status_rows,
@@ -47,12 +46,13 @@ from .position_monitor import (
     total_today_pnl,
     total_position_theta,
 )
+from .quotes import earnings_date_from_quotes as _earnings_date_from_quotes
 from .refresh import BrokerRefreshCoordinator
 from .risk import validate_new_option_trade, validate_new_trade
 from .roll import RollCandidate, find_credit_roll_candidates
 from .schwab_auth import is_schwab_auth_error
 from .strategy import find_candidate_short_options, find_candidate_strangles
-from .trading import OrderOutcomeUnknownError, broker_rejection_message, draft_or_submit_order
+from .trading import OrderOutcomeUnknownError, draft_or_submit_order
 
 ACTION_CLOSE = 0
 ACTION_ROLL = 1
@@ -1205,45 +1205,27 @@ def _adjust_order_price_with_confirmation(
         return "Adjust cancelled."
 
     try:
-        broker.preview_order(adjusted_order)
+        result = draft_or_submit_order(
+            broker=broker,
+            repository=repository,
+            config=config,
+            action=_adjust_order_action(row.draft.action),
+            order=adjusted_order,
+            estimated_price=new_price,
+            trade_id=row.draft.trade_id,
+            confirmation="YES",
+            expected_confirmation="YES",
+            replaces_order_id=broker_order_id,
+            replaced_draft_id=row.draft.id,
+        )
+    except OrderOutcomeUnknownError as exc:
+        return f"Adjust outcome is UNKNOWN. {exc}"
     except Exception as exc:
         return f"Adjust not placed: {exc}"
 
-    replacement_draft = OrderDraft(
-        trade_id=row.draft.trade_id,
-        action=_adjust_order_action(row.draft.action),
-        order_json=adjusted_order,
-        estimated_price=new_price,
-        status="DRY_RUN" if config.risk.dry_run else "UNKNOWN",
-        replaces_order_id=broker_order_id,
-    )
-    draft_id = repository.add_order_draft(replacement_draft)
-
-    if config.risk.dry_run:
-        return f"Dry-run adjust draft {draft_id} created for order {broker_order_id}. No order was replaced."
-
-    try:
-        response = replace_order(broker_order_id, adjusted_order)
-        rejection_message = broker_rejection_message(response)
-    except Exception as exc:
-        repository.update_order_status(draft_id, "UNKNOWN")
-        if row.draft.id is not None:
-            repository.update_order_broker_status(row.draft.id, broker_status="REPLACE_UNKNOWN")
-        return (
-            f"Adjust outcome is UNKNOWN for draft {draft_id}: {exc}. "
-            "Check Schwab order status before retrying."
-        )
-
-    if rejection_message is not None:
-        repository.update_order_status(draft_id, "REJECTED")
-        return f"Adjust not placed: {rejection_message}"
-
-    replacement_order_id = broker_order_id_from_response(response)
-    repository.update_order_status(draft_id, "SUBMITTED")
-    repository.update_order_broker_status(draft_id, broker_order_id=replacement_order_id)
-    if row.draft.id is not None:
-        repository.update_order_broker_status(row.draft.id, broker_status="REPLACED")
-    return f"Adjusted order {broker_order_id} to {new_price:.2f} from draft {draft_id}."
+    if result.dry_run:
+        return f"Dry-run adjust draft {result.draft_id} created for order {broker_order_id}. No order was replaced."
+    return f"Adjusted order {broker_order_id} to {new_price:.2f} from draft {result.draft_id}."
 
 
 def _adjusted_order_price(order: dict[str, Any], new_price: float) -> dict[str, Any]:
@@ -2179,26 +2161,6 @@ def _draw_open_candidates(
         footer = "Enter opens confirmation. Esc cancels."
     _add_line(stdscr, top + box_height - 2, left + 2, footer, box_width - 4)
     stdscr.refresh()
-
-
-def _earnings_date_from_quotes(quotes: dict[str, Any], symbol: str) -> date | None:
-    quote = quotes.get(symbol.upper()) or quotes.get(symbol) or {}
-    if isinstance(quote, dict) and "quote" in quote and isinstance(quote["quote"], dict):
-        merged = dict(quote)
-        merged.update(quote["quote"])
-        quote = merged
-    if not isinstance(quote, dict):
-        return None
-
-    raw = quote.get("earningsDate") or quote.get("nextEarningsDate")
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return datetime.fromtimestamp(float(raw) / 1000 if raw > 10_000_000_000 else float(raw)).date()
-    try:
-        return date.fromisoformat(str(raw)[:10])
-    except ValueError:
-        return None
 
 
 def _close_selected_option(
