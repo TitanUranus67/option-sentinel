@@ -70,6 +70,8 @@ option-sentinel strangle scan --broker fake
 
 Press `F1` for positions, `F2` for orders, and `F3` for charts. Use `q` to quit and `r` to refresh. In F1, select an option and press Enter for close or roll actions; press `n` to choose a short strangle, put, or call to sell to open.
 
+If the Schwab refresh token expires while the interactive dashboard is running, OptionSentinel automatically opens the OAuth login flow and resumes the interrupted refresh after authentication succeeds. If login is canceled or fails, the dashboard stays open; press `r` to try again.
+
 ## Schwab setup
 
 Copy your Schwab application values into `.env`:

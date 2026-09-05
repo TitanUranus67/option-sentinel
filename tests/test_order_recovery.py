@@ -356,3 +356,24 @@ def test_old_unknown_order_survives_recent_display_limit_and_reconciles(repo, ca
     saved = next(d for d in repo.list_order_drafts() if d.id == unknown_id)
     assert saved.broker_order_id == "YESTERDAY"
     assert saved.broker_status == "WORKING"
+
+
+def test_orders_auth_failure_reaches_reauthentication_handler(repo, candidate):
+    class ExpiredBroker(FakeBroker):
+        def get_orders(self, **kwargs):
+            raise RuntimeError("invalid_grant")
+
+    repo.add_order_draft(draft(candidate))
+    with pytest.raises(RuntimeError, match="invalid_grant"):
+        refresh_order_status_rows(repo.list_order_drafts(), ExpiredBroker(), repo)
+
+
+def test_charts_auth_failure_reaches_reauthentication_handler():
+    class ExpiredBroker(FakeBroker):
+        def get_intraday_price_history(self, *args, **kwargs):
+            raise RuntimeError("invalid_grant")
+
+    config = AppConfig()
+    rows = build_monitor_rows(FakeBroker(), config)
+    with pytest.raises(RuntimeError, match="invalid_grant"):
+        build_intraday_charts(ExpiredBroker(), config, rows)

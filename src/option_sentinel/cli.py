@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -43,6 +44,7 @@ from .position_monitor import (
     total_position_theta,
 )
 from .risk import validate_new_trade
+from .schwab_auth import is_schwab_auth_error, run_schwab_oauth
 from .strategy import find_candidate_strangle
 from .trading import OrderOutcomeUnknownError, draft_or_submit_order
 
@@ -72,7 +74,12 @@ def default(
         return
     config, repository, base = _load_runtime(config_path)
     broker = _get_broker(config, broker_name, config_base=base)
-    run_monitor_tui(config=config, broker=broker, repository=repository)
+    run_monitor_tui(
+        config=config,
+        broker=broker,
+        repository=repository,
+        reauthenticate=_monitor_reauthentication(config, broker_name, config_base=base),
+    )
 
 
 def _config_base(config_path: Path) -> Path:
@@ -90,12 +97,44 @@ def _load_runtime(config_path: Path) -> tuple[AppConfig, Repository, Path]:
 
 
 def _get_broker(config: AppConfig, broker_name: str | None, *, config_base: Path) -> Broker:
-    selected = (broker_name or os.environ.get("OPTION_SENTINEL_BROKER") or "fake").strip().lower()
+    selected = _selected_broker_name(broker_name)
     if selected == "fake":
         return FakeBroker()
     if selected == "schwab":
-        return SchwabBroker.from_config(config, config_base=config_base)
+        try:
+            return SchwabBroker.from_config(config, config_base=config_base)
+        except Exception as exc:
+            if not is_schwab_auth_error(exc):
+                raise
+            console.print("[bold yellow]Schwab login expired. Starting reauthentication...[/bold yellow]")
+            return _reauthenticate_schwab(config, config_base=config_base)
     raise typer.BadParameter("broker must be 'fake' or 'schwab'")
+
+
+def _selected_broker_name(broker_name: str | None) -> str:
+    return (broker_name or os.environ.get("OPTION_SENTINEL_BROKER") or "fake").strip().lower()
+
+
+def _monitor_reauthentication(
+    config: AppConfig,
+    broker_name: str | None,
+    *,
+    config_base: Path,
+) -> Callable[[], Broker] | None:
+    if _selected_broker_name(broker_name) != "schwab":
+        return None
+    return lambda: _reauthenticate_schwab(config, config_base=config_base)
+
+
+def _reauthenticate_schwab(config: AppConfig, *, config_base: Path) -> Broker:
+    console.print("Starting Schwab OAuth flow. Complete the login in your browser.")
+    token_path = run_schwab_oauth(
+        config,
+        config_base=config_base,
+        overwrite_token=True,
+    )
+    console.print(f"Token saved to {token_path} with chmod 600. Resuming OptionSentinel...")
+    return SchwabBroker.from_config(config, config_base=config_base)
 
 
 def _first_float(*values: Any) -> float | None:
@@ -316,35 +355,16 @@ def auth(
     config = load_config(config_path)
     base = _config_base(config_path)
     load_env_file(base / ".env")
-    token_path = resolve_path(config.schwab.token_path, base=base)
-    api_key = os.environ.get("SCHWAB_API_KEY")
-    app_secret = os.environ.get("SCHWAB_APP_SECRET")
-    if not api_key or not app_secret:
-        raise typer.BadParameter("Set SCHWAB_API_KEY and SCHWAB_APP_SECRET before running auth")
-
-    try:
-        from schwab import auth as schwab_auth
-    except ImportError as exc:
-        raise typer.BadParameter("Install schwab-py before running auth") from exc
-
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.parent.chmod(0o700)
-    if token_path.exists() and (overwrite_token or token_path.stat().st_size == 0):
-        token_path.unlink()
-
     console.print("Starting Schwab OAuth flow. Follow the browser or terminal prompts from schwab-py.")
-    if manual:
-        flow = getattr(schwab_auth, "client_from_manual_flow")
-        flow(api_key, app_secret, config.schwab.callback_url, str(token_path), enforce_enums=False)
-    else:
-        flow = getattr(schwab_auth, "client_from_login_flow", None)
-        if flow is not None:
-            flow(api_key, app_secret, config.schwab.callback_url, str(token_path), enforce_enums=False)
-        else:
-            easy_client = getattr(schwab_auth, "easy_client")
-            easy_client(api_key, app_secret, config.schwab.callback_url, str(token_path), enforce_enums=False)
-
-    token_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        token_path = run_schwab_oauth(
+            config,
+            config_base=base,
+            manual=manual,
+            overwrite_token=overwrite_token,
+        )
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     console.print(f"Token saved to {token_path} with chmod 600.")
     console.print(
         "Next steps: set OPTION_SENTINEL_BROKER=schwab, run `option-sentinel strangle scan`, "
@@ -391,7 +411,12 @@ def monitor(
     broker = _get_broker(config, broker_name, config_base=base)
 
     if not once:
-        run_monitor_tui(config=config, broker=broker, repository=repository)
+        run_monitor_tui(
+            config=config,
+            broker=broker,
+            repository=repository,
+            reauthenticate=_monitor_reauthentication(config, broker_name, config_base=base),
+        )
         return
 
     def render() -> Columns:
