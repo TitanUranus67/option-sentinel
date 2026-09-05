@@ -138,7 +138,8 @@ def test_refresh_order_status_rows_reconciles_unknown_outcome_by_shape(tmp_path)
 
     class Broker:
         def get_orders(self, *, from_entered_datetime: datetime, to_entered_datetime: datetime) -> list[dict[str, Any]]:
-            return [{**_order(), "orderId": "RECOVERED-1", "status": "WORKING"}]
+            return [{**_order(), "orderId": "RECOVERED-1", "status": "WORKING",
+                     "enteredTime": _draft().created_at.isoformat()}]
 
     rows, note = refresh_order_status_rows(repository.list_order_drafts(), Broker(), repository)
 

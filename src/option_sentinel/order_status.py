@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -77,13 +78,28 @@ def merge_order_status_rows(
         for order in live_orders
         if broker_order_id_from_order(order) is not None
     }
+    all_drafts = repository.list_order_drafts(limit=None) if repository is not None else drafts
+    claimed_ids = {draft.broker_order_id for draft in all_drafts if draft.broker_order_id}
+    unclaimed_orders = [
+        order for order in live_orders
+        if broker_order_id_from_order(order) is not None
+        and broker_order_id_from_order(order) not in claimed_ids
+    ]
+    match_counts = Counter(
+        broker_order_id_from_order(match)
+        for draft in all_drafts if not draft.broker_order_id and _needs_live_status(draft)
+        if (match := _matching_live_order(draft, unclaimed_orders, live_by_id)) is not None
+    )
     rows: list[OrderStatusRow] = []
     for draft in drafts:
         if not _needs_live_status(draft):
             rows.append(_stored_order_status_row(draft))
             continue
 
-        live_order = _matching_live_order(draft, live_orders, live_by_id)
+        live_order = _matching_live_order(draft, unclaimed_orders, live_by_id)
+        if live_order is not None and not draft.broker_order_id:
+            if match_counts[broker_order_id_from_order(live_order)] != 1:
+                live_order = None
         if live_order is None:
             rows.append(_stored_order_status_row(draft))
             continue
@@ -222,8 +238,6 @@ def _matching_live_order(
     timed_matches = [order for order in shape_matches if _entered_near_created_at(draft, order)]
     if len(timed_matches) == 1:
         return timed_matches[0]
-    if len(shape_matches) == 1:
-        return shape_matches[0]
     return None
 
 
@@ -254,16 +268,17 @@ def _legs_key(order: dict[str, Any]) -> tuple[tuple[str, str, str], ...]:
 def _entered_near_created_at(draft: OrderDraft, order: dict[str, Any]) -> bool:
     entered_at = _order_entered_at(order)
     if entered_at is None:
-        return True
+        return False
     created_at = draft.created_at
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
     created_at = created_at.astimezone(entered_at.tzinfo)
-    return abs((entered_at - created_at).total_seconds()) <= 60 * 60
+    # Allow small clock skew and request latency, never an arbitrary older order.
+    return -5 <= (entered_at - created_at).total_seconds() <= 5 * 60
 
 
 def _order_entered_at(order: dict[str, Any]) -> datetime | None:
-    for key in ("enteredTime", "entered_time", "closeTime"):
+    for key in ("enteredTime", "entered_time"):
         value = order.get(key)
         if not value:
             continue
