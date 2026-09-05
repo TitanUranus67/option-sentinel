@@ -7,15 +7,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class AlertState(StrEnum):
-    OK = "OK"
-    TAKE_PROFIT = "TAKE_PROFIT"
-    STOP_LOSS = "STOP_LOSS"
-    TIME_EXIT = "TIME_EXIT"
-    ASSIGNMENT_RISK = "ASSIGNMENT_RISK"
-    DATA_STALE = "DATA_STALE"
-
-
 class TradeStatus(StrEnum):
     OPEN = "OPEN"
     CLOSED = "CLOSED"
@@ -103,19 +94,6 @@ class TradeBatch(BaseModel):
     opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: TradeStatus = TradeStatus.OPEN
     notes: str = ""
-
-
-class TradeSnapshot(BaseModel):
-    id: int | None = None
-    trade_id: int
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    underlying_price: float | None
-    close_debit_mid: float
-    close_debit_conservative: float
-    pnl_mid: float
-    profit_pct: float
-    dte: int
-    alert_state: AlertState
 
 
 class OrderDraft(BaseModel):

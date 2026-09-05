@@ -3,10 +3,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from option_sentinel.config import AppConfig
-from option_sentinel.models import AlertState, OptionChain, OptionContract, TradeBatch
+from option_sentinel.models import OptionChain, OptionContract
 from option_sentinel.strategy import (
     bid_ask_spread_pct,
-    evaluate_alert,
     filter_liquid_contracts,
     find_candidate_strangle,
     find_candidate_strangles,
@@ -35,81 +34,6 @@ def _contract(
         bid=bid,
         ask=ask,
     )
-
-
-def test_profit_target_detection() -> None:
-    trade = TradeBatch(
-        id=1,
-        symbol="XYZ",
-        expiration=date.today() + timedelta(days=20),
-        quantity=1,
-        put_symbol="XYZP",
-        put_strike=90,
-        call_symbol="XYZC",
-        call_strike=110,
-        original_credit=2.00,
-    )
-
-    alert = evaluate_alert(
-        trade,
-        close_debit_mid=0.40,
-        close_debit_conservative=0.45,
-        underlying_price=100,
-        dte=20,
-        strategy=AppConfig().strategy,
-    )
-
-    assert alert == AlertState.TAKE_PROFIT
-
-
-def test_stop_loss_detection_takes_priority() -> None:
-    trade = TradeBatch(
-        id=1,
-        symbol="XYZ",
-        expiration=date.today() + timedelta(days=20),
-        quantity=1,
-        put_symbol="XYZP",
-        put_strike=90,
-        call_symbol="XYZC",
-        call_strike=110,
-        original_credit=2.00,
-    )
-
-    alert = evaluate_alert(
-        trade,
-        close_debit_mid=0.30,
-        close_debit_conservative=4.00,
-        underlying_price=100,
-        dte=20,
-        strategy=AppConfig().strategy,
-    )
-
-    assert alert == AlertState.STOP_LOSS
-
-
-def test_force_exit_detection() -> None:
-    trade = TradeBatch(
-        id=1,
-        symbol="XYZ",
-        expiration=date.today() + timedelta(days=7),
-        quantity=1,
-        put_symbol="XYZP",
-        put_strike=90,
-        call_symbol="XYZC",
-        call_strike=110,
-        original_credit=2.00,
-    )
-
-    alert = evaluate_alert(
-        trade,
-        close_debit_mid=1.00,
-        close_debit_conservative=1.10,
-        underlying_price=100,
-        dte=7,
-        strategy=AppConfig().strategy,
-    )
-
-    assert alert == AlertState.TIME_EXIT
 
 
 def test_closest_delta_selection_uses_absolute_delta() -> None:
