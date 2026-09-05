@@ -1741,7 +1741,8 @@ def test_tui_adjust_timeout_marks_replacement_outcome_unknown(tmp_path) -> None:
     replacement = next(draft for draft in saved if draft.action == "OPEN_ADJUST")
     original = next(draft for draft in saved if draft.id == original_id)
     assert replacement.status == "UNKNOWN"
-    assert replacement.broker_order_id == "OLD-1"
+    assert replacement.broker_order_id is None
+    assert replacement.replaces_order_id == "OLD-1"
     assert original.broker_status == "REPLACE_UNKNOWN"
 
 
@@ -1788,7 +1789,8 @@ def test_tui_adjust_open_order_dry_run_records_draft_without_replace(tmp_path) -
     adjusted = next(draft for draft in repository.list_order_drafts() if draft.action == "CLOSE_OPTION_ADJUST")
     assert adjusted.status == "DRY_RUN"
     assert adjusted.order_json["price"] == "0.85"
-    assert adjusted.broker_order_id == "OLD-1"
+    assert adjusted.broker_order_id is None
+    assert adjusted.replaces_order_id == "OLD-1"
 
 
 def test_tui_adjust_rejects_non_open_orders(tmp_path) -> None:

@@ -128,6 +128,7 @@ class OrderDraft(BaseModel):
     status: str = "DRAFT"
     broker_order_id: str | None = None
     broker_status: str | None = None
+    replaces_order_id: str | None = None
 
 
 class RiskCheck(BaseModel):
