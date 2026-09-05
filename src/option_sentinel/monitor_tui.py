@@ -16,6 +16,7 @@ from .order_status import (
     OrderStatusRow,
     broker_order_id_from_response,
     open_closing_order_symbols,
+    order_drafts_for_refresh,
     refresh_order_status_rows,
 )
 from .orders import build_close_option_order, build_open_option_order, build_open_order, build_roll_option_order
@@ -424,7 +425,7 @@ def _build_monitor_rows_with_open_closing_orders(
 
 
 def _refresh_todays_order_rows(*, broker: Broker, repository: Repository) -> tuple[list[OrderStatusRow], str | None]:
-    order_drafts = repository.list_order_drafts(limit=ORDER_DRAFT_LIMIT, only_today=True)
+    order_drafts = order_drafts_for_refresh(repository, recent_limit=ORDER_DRAFT_LIMIT)
     return refresh_order_status_rows(order_drafts, broker, repository)
 
 
@@ -457,7 +458,7 @@ def _order_refresh_status(
     *,
     refreshed_at: datetime,
 ) -> str:
-    status = f"{len(rows)} local order records today | refreshed {refreshed_at.strftime('%H:%M:%S')}"
+    status = f"{len(rows)} recent and unresolved local orders | refreshed {refreshed_at.strftime('%H:%M:%S')}"
     if live_status_note:
         status = f"{status} | {live_status_note}"
     return status
@@ -1511,7 +1512,7 @@ def _open_candidate_with_confirmation(
     confirm_func,
 ) -> str:
     try:
-        submitted_drafts = repository.list_order_drafts(limit=None, only_today=True)
+        submitted_drafts = order_drafts_for_refresh(repository, recent_limit=None)
         refresh_order_status_rows(submitted_drafts, broker, repository)
         positions = broker.get_positions()
         if isinstance(candidate, CandidateStrangle):

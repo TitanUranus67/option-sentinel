@@ -32,7 +32,7 @@ The monitor, order dashboard, risk accounting, and charts are strategy-neutral. 
 - Market orders are rejected.
 - Unknown configuration keys and unsafe numeric values fail at startup.
 - Failed broker reads fail closed instead of appearing as empty positions or orders.
-- Ambiguous submission outcomes are recorded as `UNKNOWN` and must be reconciled before another open.
+- Ambiguous submission outcomes are recorded as `UNKNOWN` and must be reconciled before another open, even across calendar days.
 - Working opens reserve daily trade, option-position, covered-share, assignment-capital, and stop-risk capacity.
 - Existing and individually rolled short legs remain included in stop-risk calculations.
 
