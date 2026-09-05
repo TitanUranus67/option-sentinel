@@ -50,7 +50,8 @@ def draft_or_submit_order(
         action=action,
         order_json=order,
         estimated_price=estimated_price,
-        status="DRY_RUN" if config.risk.dry_run else "DRAFT",
+        # Persist uncertainty before the request so interruption cannot hide an order.
+        status="DRY_RUN" if config.risk.dry_run else "UNKNOWN",
     )
     draft_id = repository.add_order_draft(draft)
 

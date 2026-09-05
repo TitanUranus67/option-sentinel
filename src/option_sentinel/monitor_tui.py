@@ -1099,7 +1099,7 @@ def _adjust_order_price_with_confirmation(
         action=_adjust_order_action(row.draft.action),
         order_json=adjusted_order,
         estimated_price=new_price,
-        status="DRY_RUN" if config.risk.dry_run else "DRAFT",
+        status="DRY_RUN" if config.risk.dry_run else "UNKNOWN",
         replaces_order_id=broker_order_id,
     )
     draft_id = repository.add_order_draft(replacement_draft)
