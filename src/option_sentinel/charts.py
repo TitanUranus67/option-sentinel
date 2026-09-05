@@ -6,7 +6,8 @@ from typing import Any
 
 from .broker import Broker
 from .config import AppConfig
-from .position_monitor import OptionMonitorRow, first_float
+from .position_monitor import OptionMonitorRow
+from .quotes import first_float
 from .schwab_auth import is_schwab_auth_error
 
 

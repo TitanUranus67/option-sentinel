@@ -40,6 +40,8 @@ def draft_or_submit_order(
     trade_id: int | None,
     confirmation: str,
     expected_confirmation: str,
+    replaces_order_id: str | None = None,
+    replaced_draft_id: int | None = None,
 ) -> ExecutionResult:
     if config.risk.require_confirmation or not config.risk.dry_run:
         require_exact_confirmation(confirmation, expected_confirmation)
@@ -52,6 +54,7 @@ def draft_or_submit_order(
         estimated_price=estimated_price,
         # Persist uncertainty before the request so interruption cannot hide an order.
         status="DRY_RUN" if config.risk.dry_run else "UNKNOWN",
+        replaces_order_id=replaces_order_id,
     )
     draft_id = repository.add_order_draft(draft)
 
@@ -64,10 +67,15 @@ def draft_or_submit_order(
         )
 
     try:
-        response = broker.place_order(order)
+        response = (
+            broker.replace_order(replaces_order_id, order)
+            if replaces_order_id is not None else broker.place_order(order)
+        )
         rejection_message = broker_rejection_message(response)
     except Exception as exc:
         repository.update_order_status(draft_id, "UNKNOWN")
+        if replaced_draft_id is not None:
+            repository.update_order_broker_status(replaced_draft_id, broker_status="REPLACE_UNKNOWN")
         raise OrderOutcomeUnknownError(draft_id=draft_id, action=action, cause=exc) from exc
     if rejection_message is not None:
         repository.update_order_status(draft_id, "REJECTED")
@@ -76,6 +84,8 @@ def draft_or_submit_order(
     broker_order_id = broker_order_id_from_response(response)
     if broker_order_id is not None:
         repository.update_order_broker_status(draft_id, broker_order_id=broker_order_id)
+    if replaced_draft_id is not None:
+        repository.update_order_broker_status(replaced_draft_id, broker_status="REPLACED")
     return ExecutionResult(
         draft_id=draft_id,
         submitted=True,

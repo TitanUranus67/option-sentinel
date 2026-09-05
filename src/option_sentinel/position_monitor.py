@@ -6,6 +6,7 @@ from typing import Any
 from .broker import Broker
 from .config import AppConfig
 from .position_import import BrokerOptionPosition, parse_option_position
+from .quotes import first_float, first_quote_float, quote_for, quote_sources
 from .strategy import days_to_expiration
 
 TRAILING_RANGE_DAYS = 30
@@ -800,49 +801,6 @@ def pop_from_delta(position: BrokerOptionPosition, delta: float | None) -> float
     if position.side == "LONG":
         return round(probability_itm, 4)
     return None
-
-
-def quote_for(quotes: dict[str, Any], symbol: str) -> dict[str, Any]:
-    normalized = symbol.upper()
-    quote = quotes.get(normalized) or quotes.get(symbol) or {}
-    if isinstance(quote, dict) and "quote" in quote and isinstance(quote["quote"], dict):
-        merged = dict(quote)
-        merged.update(quote["quote"])
-        return merged
-    return quote if isinstance(quote, dict) else {}
-
-
-def first_float(*values: Any) -> float | None:
-    for value in values:
-        if value is None:
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def first_quote_float(quote: dict[str, Any], *keys: str) -> float | None:
-    for source in quote_sources(quote):
-        lowered = {str(key).lower(): value for key, value in source.items()}
-        for key in keys:
-            value = source.get(key)
-            if value is None:
-                value = lowered.get(key.lower())
-            parsed = first_float(value)
-            if parsed is not None:
-                return parsed
-    return None
-
-
-def quote_sources(quote: dict[str, Any]) -> list[dict[str, Any]]:
-    sources = [quote]
-    for key in ("quote", "fundamental", "regular", "extended", "reference"):
-        nested = quote.get(key)
-        if isinstance(nested, dict):
-            sources.append(nested)
-    return sources
 
 
 def format_optional_price(value: float | None) -> str:

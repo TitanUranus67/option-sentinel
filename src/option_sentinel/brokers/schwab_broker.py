@@ -7,6 +7,7 @@ from typing import Any
 
 from ..broker import Broker
 from ..config import AppConfig, resolve_path
+from ..quotes import first_float as _first_float
 from ..models import OptionChain, OptionContract
 
 TRAILING_PRICE_HISTORY_CACHE_SECONDS = 1800
@@ -442,14 +443,3 @@ def _parse_option_side(symbol: str, exp_map: dict[str, Any], option_type: str) -
                     )
                 )
     return [contract for contract in contracts if contract.symbol]
-
-
-def _first_float(*values: Any) -> float | None:
-    for value in values:
-        if value is None:
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
