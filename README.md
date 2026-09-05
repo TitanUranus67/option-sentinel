@@ -119,7 +119,7 @@ Run `option-sentinel --help` or `option-sentinel strangle --help` for all option
 
 See [config.example.yml](config.example.yml) for every supported setting. Unknown keys and invalid safety values are rejected instead of silently falling back to defaults.
 
-SQLite stores legacy paired-strangle records and snapshots plus generic local order drafts. Timestamps are stored in UTC; daily order and trade queries use the machine's local calendar boundaries. Runtime files are intentionally excluded from version control.
+SQLite stores legacy paired-strangle records and generic local order drafts. Existing historical snapshot tables are preserved. Timestamps are stored in UTC; daily order queries use the machine's local calendar boundaries. Runtime files are intentionally excluded from version control.
 
 ## Development
 

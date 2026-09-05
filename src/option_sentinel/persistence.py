@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Iterable, Iterator
 
-from .models import OrderDraft, TradeBatch, TradeSnapshot, TradeStatus
+from .models import OrderDraft, TradeBatch, TradeStatus
 
 
 @contextmanager
@@ -72,20 +72,6 @@ class Repository:
                         notes TEXT NOT NULL DEFAULT ''
                     );
 
-                    CREATE TABLE IF NOT EXISTS trade_snapshots (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        trade_id INTEGER NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        underlying_price REAL,
-                        close_debit_mid REAL NOT NULL,
-                        close_debit_conservative REAL NOT NULL,
-                        pnl_mid REAL NOT NULL,
-                        profit_pct REAL NOT NULL,
-                        dte INTEGER NOT NULL,
-                        alert_state TEXT NOT NULL,
-                        FOREIGN KEY(trade_id) REFERENCES trade_batches(id)
-                    );
-
                     CREATE TABLE IF NOT EXISTS order_drafts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         trade_id INTEGER,
@@ -139,11 +125,6 @@ class Repository:
             )
             return int(cursor.lastrowid)
 
-    def delete_trade_batch(self, trade_id: int) -> None:
-        self.init_db()
-        with _connect(self.sqlite_path) as conn:
-            conn.execute("DELETE FROM trade_batches WHERE id = ?", (trade_id,))
-
     def get_trade_batch(self, trade_id: int) -> TradeBatch:
         self.init_db()
         with _connect(self.sqlite_path) as conn:
@@ -168,30 +149,6 @@ class Repository:
         with _connect(self.sqlite_path) as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_trade(row) for row in rows]
-
-    def add_snapshot(self, snapshot: TradeSnapshot) -> int:
-        self.init_db()
-        with _connect(self.sqlite_path) as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO trade_snapshots (
-                    trade_id, timestamp, underlying_price, close_debit_mid,
-                    close_debit_conservative, pnl_mid, profit_pct, dte, alert_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    snapshot.trade_id,
-                    _dt(snapshot.timestamp),
-                    snapshot.underlying_price,
-                    snapshot.close_debit_mid,
-                    snapshot.close_debit_conservative,
-                    snapshot.pnl_mid,
-                    snapshot.profit_pct,
-                    snapshot.dte,
-                    snapshot.alert_state.value,
-                ),
-            )
-            return int(cursor.lastrowid)
 
     def add_order_draft(self, draft: OrderDraft) -> int:
         self.init_db()
@@ -265,42 +222,6 @@ class Repository:
                 f"UPDATE order_drafts SET {', '.join(assignments)} WHERE id = ?",
                 params,
             )
-
-    def count_open_batches(self) -> int:
-        self.init_db()
-        with _connect(self.sqlite_path) as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS count FROM trade_batches WHERE status = ?",
-                (TradeStatus.OPEN.value,),
-            ).fetchone()
-        return int(row["count"])
-
-    def count_new_batches_today(self) -> int:
-        self.init_db()
-        start, end = _local_day_utc_bounds()
-        with _connect(self.sqlite_path) as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS count
-                FROM trade_batches
-                WHERE opened_at >= ? AND opened_at < ? AND status IN (?, ?)
-                """,
-                (start, end, TradeStatus.OPEN.value, TradeStatus.PENDING_OPEN.value),
-            ).fetchone()
-        return int(row["count"])
-
-    def total_open_stop_risk(self, stop_multiple: float) -> float:
-        self.init_db()
-        with _connect(self.sqlite_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT original_credit, quantity
-                FROM trade_batches
-                WHERE status = ?
-                """,
-                (TradeStatus.OPEN.value,),
-            ).fetchall()
-        return sum(max(0.0, float(row["original_credit"]) * (stop_multiple - 1) * 100 * int(row["quantity"])) for row in rows)
 
     @staticmethod
     def _row_to_trade(row: sqlite3.Row) -> TradeBatch:

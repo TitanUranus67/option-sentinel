@@ -439,24 +439,15 @@ def test_repository_today_filters_use_local_day_across_utc_date_boundary(tmp_pat
                 status="SUBMITTED",
             )
         )
-        for opened_at in (before_local_day, evening_local):
-            repository.add_trade_batch(
-                TradeBatch(
-                    symbol="XYZ",
-                    expiration=local_today + timedelta(days=25),
-                    quantity=1,
-                    put_symbol="XYZP",
-                    put_strike=80,
-                    call_symbol="XYZC",
-                    call_strike=120,
-                    original_credit=2.0,
-                    opened_at=opened_at,
-                )
+        repository.add_order_draft(
+            OrderDraft(
+                created_at=before_local_day, action="OPEN", order_json={},
+                estimated_price=1.23, status="DRY_RUN",
             )
+        )
 
         assert evening_local.astimezone(timezone.utc).date() == local_today + timedelta(days=1)
         assert [draft.id for draft in repository.list_order_drafts(only_today=True)] == [draft_id]
-        assert repository.count_new_batches_today() == 1
     finally:
         if original_tz is None:
             monkeypatch.delenv("TZ", raising=False)

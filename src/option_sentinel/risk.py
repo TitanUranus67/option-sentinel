@@ -34,14 +34,6 @@ def share_quantity(positions: list[dict[str, Any]], symbol: str) -> float:
     return quantity
 
 
-def assignment_capital_required(candidate: CandidateStrangle, *, quantity: int) -> float:
-    return candidate.put.strike * 100 * quantity
-
-
-def candidate_stop_risk(candidate: CandidateStrangle, *, quantity: int, stop_multiple: float) -> float:
-    return max(0.0, candidate.estimated_credit_mid * (stop_multiple - 1) * 100 * quantity)
-
-
 def broker_option_position_count(positions: list[dict[str, Any]]) -> int:
     return sum(position.quantity for position in (parse_option_position(position) for position in positions) if position)
 

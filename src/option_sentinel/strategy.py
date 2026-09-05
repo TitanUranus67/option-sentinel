@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date
 from typing import Iterable
 
-from .config import AppConfig, StrategyConfig
+from .config import AppConfig
 from .models import (
-    AlertState,
     CandidateShortOption,
     CandidateStrangle,
     OptionChain,
     OptionContract,
-    TradeBatch,
-    TradeSnapshot,
 )
 
 
@@ -206,68 +203,3 @@ def find_candidate_short_options(
     if limit is not None:
         return candidates[:limit]
     return candidates
-
-
-def evaluate_alert(
-    trade: TradeBatch,
-    *,
-    close_debit_mid: float,
-    close_debit_conservative: float,
-    underlying_price: float | None,
-    dte: int,
-    strategy: StrategyConfig,
-    data_stale: bool = False,
-) -> AlertState:
-    epsilon = 1e-9
-    if data_stale:
-        return AlertState.DATA_STALE
-    if close_debit_conservative + epsilon >= trade.original_credit * strategy.stop_multiple:
-        return AlertState.STOP_LOSS
-    if close_debit_mid <= trade.original_credit * (1 - strategy.profit_take_pct) + epsilon:
-        return AlertState.TAKE_PROFIT
-    if dte <= strategy.force_exit_dte:
-        return AlertState.TIME_EXIT
-    if underlying_price is not None and (underlying_price <= trade.put_strike or underlying_price >= trade.call_strike):
-        return AlertState.ASSIGNMENT_RISK
-    return AlertState.OK
-
-
-def build_trade_snapshot(
-    trade: TradeBatch,
-    *,
-    underlying_price: float | None,
-    put_bid: float,
-    put_ask: float,
-    call_bid: float,
-    call_ask: float,
-    strategy: StrategyConfig,
-    as_of: date | None = None,
-    timestamp: datetime | None = None,
-    data_stale: bool = False,
-) -> TradeSnapshot:
-    current = as_of or date.today()
-    close_debit_mid = round(((put_bid + put_ask) / 2) + ((call_bid + call_ask) / 2), 4)
-    close_debit_conservative = round(put_ask + call_ask, 4)
-    pnl_mid = round((trade.original_credit - close_debit_mid) * 100 * trade.quantity, 2)
-    profit_pct = 0.0 if trade.original_credit == 0 else round((trade.original_credit - close_debit_mid) / trade.original_credit, 4)
-    dte = days_to_expiration(trade.expiration, as_of=current)
-    alert_state = evaluate_alert(
-        trade,
-        close_debit_mid=close_debit_mid,
-        close_debit_conservative=close_debit_conservative,
-        underlying_price=underlying_price,
-        dte=dte,
-        strategy=strategy,
-        data_stale=data_stale,
-    )
-    return TradeSnapshot(
-        trade_id=trade.id or 0,
-        timestamp=timestamp or datetime.now().astimezone(),
-        underlying_price=underlying_price,
-        close_debit_mid=close_debit_mid,
-        close_debit_conservative=close_debit_conservative,
-        pnl_mid=pnl_mid,
-        profit_pct=profit_pct,
-        dte=dte,
-        alert_state=alert_state,
-    )
