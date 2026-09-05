@@ -189,6 +189,21 @@ def _is_open_action(action: str) -> bool:
     return normalized == "OPEN" or normalized.startswith("OPEN_ADJUST")
 
 
+def pending_open_stop_risk(repository: Repository, *, stop_multiple: float) -> float:
+    total = 0.0
+    for draft in _submitted_open_order_drafts(repository):
+        if not _is_pending_open_order(draft):
+            continue
+        # Supported opens have equal leg quantities and a per-unit net credit.
+        quantity = max(
+            (float(leg.get("quantity", 0)) for leg in draft.order_json.get("orderLegCollection") or []
+             if isinstance(leg, dict) and str(leg.get("instruction") or "").upper() == "SELL_TO_OPEN"),
+            default=0,
+        )
+        total += max(0.0, draft.estimated_price * (stop_multiple - 1) * 100 * quantity)
+    return total
+
+
 def _broker_status(draft: OrderDraft) -> str:
     return str(draft.broker_status or "").strip().upper().replace(" ", "_")
 
@@ -322,11 +337,13 @@ def _validate_new_open(
         0.0,
         estimated_credit_mid * (config.strategy.stop_multiple - 1) * 100 * quantity,
     )
-    total_stop_risk = live_stop_risk + new_stop_risk
+    pending_stop_risk = pending_open_stop_risk(repository, stop_multiple=config.strategy.stop_multiple)
+    total_stop_risk = live_stop_risk + pending_stop_risk + new_stop_risk
     if total_stop_risk > config.risk.max_total_stop_risk:
+        pending_breakdown = f", pending: {pending_stop_risk:,.2f}" if pending_stop_risk else ""
         messages.append(
             "max_total_stop_risk would be exceeded "
-            f"(live: {live_stop_risk:,.2f}, new: {new_stop_risk:,.2f}, "
+            f"(live: {live_stop_risk:,.2f}{pending_breakdown}, new: {new_stop_risk:,.2f}, "
             f"total: {total_stop_risk:,.2f}, limit: {config.risk.max_total_stop_risk:,.2f})"
         )
 

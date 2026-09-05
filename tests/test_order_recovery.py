@@ -278,3 +278,41 @@ def test_assignment_capital_is_scoped_to_symbol_and_short_puts(repo, candidate):
     config.risk.max_assignment_capital_per_symbol = 8_000
     result = validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=positions)
     assert result.allowed
+
+
+def test_pending_orders_reserve_stop_risk(repo, candidate):
+    repo.add_order_draft(draft(candidate, broker_status="WORKING"))
+    config = AppConfig()
+    config.risk.max_new_trades_per_day = 10
+    config.risk.max_total_stop_risk = 150
+    result = validate_new_option_trade(
+        candidate, quantity=1, config=config, repository=repo, positions=[],
+    )
+    assert not result.allowed, "Pending $105 plus new $105 exceeds $150 cap"
+
+
+@pytest.mark.parametrize("status", ["FILLED", "CANCELED", "REJECTED", "REPLACED", "EXPIRED"])
+def test_terminal_orders_do_not_reserve_pending_stop_risk(repo, candidate, status):
+    repo.add_order_draft(draft(candidate, broker_status=status))
+    config = AppConfig()
+    config.risk.max_new_trades_per_day = 10
+    config.risk.max_total_stop_risk = 150
+    assert validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=[]).allowed
+
+
+def test_pending_multileg_stop_risk_uses_net_credit_per_unit(repo, candidate):
+    spec = order(candidate)
+    spec["quantity"] = 2
+    spec["price"] = "2.10"
+    spec["orderLegCollection"][0]["quantity"] = 2
+    spec["orderLegCollection"].append({
+        "instruction": "SELL_TO_OPEN", "quantity": 2,
+        "instrument": {"symbol": f"XYZ_{candidate.expiration:%y%m%d}C120", "assetType": "OPTION"},
+    })
+    repo.add_order_draft(draft(candidate, order_json=spec, estimated_price=2.10, broker_status="WORKING"))
+    config = AppConfig()
+    config.risk.max_new_trades_per_day = 10
+    config.risk.max_total_stop_risk = 525
+    assert validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=[]).allowed
+    config.risk.max_total_stop_risk = 524
+    assert not validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=[]).allowed
