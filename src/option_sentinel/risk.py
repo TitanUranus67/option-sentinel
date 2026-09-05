@@ -101,7 +101,7 @@ def broker_short_call_contract_count(positions: list[dict[str, Any]], symbol: st
 
 
 def submitted_open_order_count(repository: Repository) -> int:
-    return sum(1 for draft in _submitted_open_order_drafts(repository) if _counts_as_new_trade(draft))
+    return sum(1 for draft in _submitted_open_order_drafts(repository, only_today=True) if _counts_as_new_trade(draft))
 
 
 def reserved_put_assignment_capital(
@@ -129,7 +129,7 @@ def reserved_put_assignment_capital(
 def unresolved_unknown_open_order_count(repository: Repository) -> int:
     return sum(
         1
-        for draft in repository.list_order_drafts(limit=None, only_today=True)
+        for draft in repository.list_order_drafts(limit=None)
         if draft.status.upper() == "UNKNOWN"
         and _is_open_action(draft.action)
         and _broker_status(draft) in {"", "UNKNOWN"}
@@ -176,10 +176,10 @@ def pending_short_call_contract_count(repository: Repository, symbol: str) -> in
     return total
 
 
-def _submitted_open_order_drafts(repository: Repository) -> list[OrderDraft]:
+def _submitted_open_order_drafts(repository: Repository, *, only_today: bool = False) -> list[OrderDraft]:
     return [
         draft
-        for draft in repository.list_order_drafts(limit=None, only_today=True)
+        for draft in repository.list_order_drafts(limit=None, only_today=only_today)
         if draft.status.upper() in {"SUBMITTED", "UNKNOWN"} and _is_open_action(draft.action)
     ]
 

@@ -19,7 +19,7 @@ from option_sentinel.models import CandidateShortOption, OptionContract, OrderDr
 from option_sentinel.monitor_tui import _adjust_order_price_with_confirmation
 
 
-from option_sentinel.order_status import _query_window, refresh_order_status_rows
+from option_sentinel.order_status import _query_window, refresh_order_status_rows, order_drafts_for_refresh
 
 
 from option_sentinel.orders import build_open_option_order
@@ -35,6 +35,7 @@ from option_sentinel.risk import (
     pending_open_option_position_count,
     unresolved_unknown_open_order_count,
     validate_new_option_trade,
+    submitted_open_order_count,
 )
 
 
@@ -316,3 +317,42 @@ def test_pending_multileg_stop_risk_uses_net_credit_per_unit(repo, candidate):
     assert validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=[]).allowed
     config.risk.max_total_stop_risk = 524
     assert not validate_new_option_trade(candidate, quantity=1, config=config, repository=repo, positions=[]).allowed
+
+
+def test_unknown_orders_do_not_disappear_at_midnight(repo, candidate):
+    repo.add_order_draft(draft(
+        candidate, status="UNKNOWN", created_at=datetime.now(timezone.utc)-timedelta(days=1),
+    ))
+    assert unresolved_unknown_open_order_count(repo) == 1
+
+
+def test_reconciliation_queries_before_today(candidate):
+    pending = draft(candidate, created_at=datetime.now(timezone.utc)-timedelta(days=1))
+    start, _ = _query_window([pending])
+    assert start <= pending.created_at
+
+
+def test_yesterdays_working_order_retains_capacity_without_counting_as_new_today(repo, candidate):
+    repo.add_order_draft(draft(
+        candidate, broker_status="WORKING", created_at=datetime.now(timezone.utc)-timedelta(days=1),
+    ))
+    assert pending_open_option_position_count(repo) == 1
+    assert submitted_open_order_count(repo) == 0
+
+
+def test_old_unknown_order_survives_recent_display_limit_and_reconciles(repo, candidate):
+    yesterday = datetime.now(timezone.utc)-timedelta(days=1)
+    unknown_id = repo.add_order_draft(draft(candidate, status="UNKNOWN", created_at=yesterday))
+    for _ in range(3):
+        repo.add_order_draft(draft(candidate, status="DRY_RUN"))
+    displayed = order_drafts_for_refresh(repo, recent_limit=1)
+    assert len(displayed) == 2
+    assert unknown_id in {d.id for d in displayed}
+    broker = FakeBroker()
+    broker.order_records.append({
+        **order(candidate), "orderId": "YESTERDAY", "status": "WORKING", "enteredTime": yesterday.isoformat(),
+    })
+    refresh_order_status_rows(displayed, broker, repo)
+    saved = next(d for d in repo.list_order_drafts() if d.id == unknown_id)
+    assert saved.broker_order_id == "YESTERDAY"
+    assert saved.broker_status == "WORKING"

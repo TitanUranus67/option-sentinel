@@ -67,6 +67,15 @@ def refresh_order_status_rows(
     return merge_order_status_rows(drafts, live_orders, repository=repository), None
 
 
+def order_drafts_for_refresh(repository: Repository, *, recent_limit: int | None = 100) -> list[OrderDraft]:
+    """Show recent local orders and retain every unresolved order regardless of age."""
+    drafts = repository.list_order_drafts(limit=None)
+    today = datetime.now().astimezone().date()
+    recent = [draft for draft in drafts if draft.created_at.astimezone().date() == today][:recent_limit]
+    recent_ids = {draft.id for draft in recent}
+    return [draft for draft in drafts if draft.id in recent_ids or _needs_live_status(draft)]
+
+
 def merge_order_status_rows(
     drafts: list[OrderDraft],
     live_orders: list[dict[str, Any]],
@@ -217,8 +226,6 @@ def _query_window(drafts: list[OrderDraft]) -> tuple[datetime, datetime]:
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     submitted_times = [draft.created_at.astimezone(timezone.utc) for draft in drafts if _needs_live_status(draft)]
     start = min(submitted_times, default=start_of_day) - timedelta(minutes=10)
-    if start < start_of_day:
-        start = start_of_day
     return start, now + timedelta(minutes=5)
 
 

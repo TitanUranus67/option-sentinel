@@ -20,7 +20,7 @@ from .confirmation import close_confirmation_phrase, open_confirmation_phrase
 from .models import CandidateStrangle, OrderDraft, TradeBatch
 from .monitor_tui import run_monitor_tui
 from .orders import build_close_order, build_open_order
-from .order_status import open_closing_order_symbols, refresh_order_status_rows
+from .order_status import open_closing_order_symbols, order_drafts_for_refresh, refresh_order_status_rows
 from .persistence import Repository
 from .position_monitor import (
     apply_closing_order_flags,
@@ -162,7 +162,7 @@ def _candidate_for_symbol(config: AppConfig, broker: Broker, symbol: str) -> Can
 
 
 def _refresh_submitted_order_statuses(repository: Repository, broker: Broker) -> None:
-    drafts = repository.list_order_drafts(limit=None, only_today=True)
+    drafts = order_drafts_for_refresh(repository, recent_limit=None)
     refresh_order_status_rows(drafts, broker, repository)
 
 
@@ -397,7 +397,7 @@ def monitor(
     def render() -> Columns:
         account = broker.get_account()
         rows, account_summary = build_monitor_snapshot(broker, config, account=account)
-        order_drafts = repository.list_order_drafts(only_today=True)
+        order_drafts = order_drafts_for_refresh(repository)
         order_rows, _ = refresh_order_status_rows(order_drafts, broker, repository)
         rows = apply_closing_order_flags(rows, open_closing_order_symbols(order_rows))
         theta = format_total_theta(total_position_theta(rows))
