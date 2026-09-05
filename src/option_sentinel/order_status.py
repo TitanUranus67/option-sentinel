@@ -214,7 +214,11 @@ def _matching_live_order(
     if draft.broker_order_id:
         return live_by_id.get(draft.broker_order_id)
 
-    shape_matches = [order for order in live_orders if _same_order_shape(draft.order_json, order)]
+    shape_matches = [
+        order for order in live_orders
+        if _same_order_shape(draft.order_json, order)
+        and (not draft.replaces_order_id or broker_order_id_from_order(order) != draft.replaces_order_id)
+    ]
     timed_matches = [order for order in shape_matches if _entered_near_created_at(draft, order)]
     if len(timed_matches) == 1:
         return timed_matches[0]

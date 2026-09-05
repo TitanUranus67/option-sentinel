@@ -110,6 +110,8 @@ class Repository:
             conn.execute("ALTER TABLE order_drafts ADD COLUMN broker_order_id TEXT")
         if "broker_status" not in columns:
             conn.execute("ALTER TABLE order_drafts ADD COLUMN broker_status TEXT")
+        if "replaces_order_id" not in columns:
+            conn.execute("ALTER TABLE order_drafts ADD COLUMN replaces_order_id TEXT")
 
     def add_trade_batch(self, trade: TradeBatch) -> int:
         self.init_db()
@@ -197,8 +199,9 @@ class Repository:
             cursor = conn.execute(
                 """
                 INSERT INTO order_drafts (
-                    trade_id, created_at, action, order_json, estimated_price, status, broker_order_id, broker_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    trade_id, created_at, action, order_json, estimated_price, status,
+                    broker_order_id, broker_status, replaces_order_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft.trade_id,
@@ -209,6 +212,7 @@ class Repository:
                     draft.status,
                     draft.broker_order_id,
                     draft.broker_status,
+                    draft.replaces_order_id,
                 ),
             )
             return int(cursor.lastrowid)
@@ -327,4 +331,5 @@ class Repository:
             status=row["status"],
             broker_order_id=row["broker_order_id"],
             broker_status=row["broker_status"],
+            replaces_order_id=row["replaces_order_id"],
         )

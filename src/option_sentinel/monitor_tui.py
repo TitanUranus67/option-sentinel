@@ -1100,7 +1100,7 @@ def _adjust_order_price_with_confirmation(
         order_json=adjusted_order,
         estimated_price=new_price,
         status="DRY_RUN" if config.risk.dry_run else "DRAFT",
-        broker_order_id=broker_order_id,
+        replaces_order_id=broker_order_id,
     )
     draft_id = repository.add_order_draft(replacement_draft)
 
@@ -1123,7 +1123,7 @@ def _adjust_order_price_with_confirmation(
         repository.update_order_status(draft_id, "REJECTED")
         return f"Adjust not placed: {rejection_message}"
 
-    replacement_order_id = broker_order_id_from_response(response) or broker_order_id
+    replacement_order_id = broker_order_id_from_response(response)
     repository.update_order_status(draft_id, "SUBMITTED")
     repository.update_order_broker_status(draft_id, broker_order_id=replacement_order_id)
     if row.draft.id is not None:
