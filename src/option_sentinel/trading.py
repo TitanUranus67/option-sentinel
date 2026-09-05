@@ -65,10 +65,10 @@ def draft_or_submit_order(
 
     try:
         response = broker.place_order(order)
+        rejection_message = broker_rejection_message(response)
     except Exception as exc:
         repository.update_order_status(draft_id, "UNKNOWN")
         raise OrderOutcomeUnknownError(draft_id=draft_id, action=action, cause=exc) from exc
-    rejection_message = broker_rejection_message(response)
     if rejection_message is not None:
         repository.update_order_status(draft_id, "REJECTED")
         raise RuntimeError(rejection_message)
@@ -86,14 +86,16 @@ def draft_or_submit_order(
 
 def broker_rejection_message(response: dict[str, Any]) -> str | None:
     status_code = response.get("status_code")
-    if status_code is None:
+    if "status_code" not in response:
         return None
     try:
         status_int = int(status_code)
-    except (TypeError, ValueError):
-        return None
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Broker returned an invalid HTTP status; acceptance is uncertain") from exc
     if 200 <= status_int < 300:
         return None
+    if status_int == 408 or not 400 <= status_int < 500:
+        raise RuntimeError(f"Broker returned HTTP {status_int}; acceptance is uncertain")
 
     body = response.get("body")
     if body:

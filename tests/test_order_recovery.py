@@ -39,6 +39,7 @@ from option_sentinel.risk import (
 
 
 from option_sentinel.trading import draft_or_submit_order
+from option_sentinel.trading import OrderOutcomeUnknownError
 
 
 @pytest.fixture
@@ -208,5 +209,39 @@ def test_replacement_interruption_keeps_durable_unknown_state(repo, candidate):
             confirm_func=lambda *_: True,
         )
     assert unresolved_unknown_open_order_count(Repository(repo.sqlite_path)) == 1
+    refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    assert pending_open_option_position_count(repo) == 1
+
+
+@pytest.mark.parametrize("status_code", [408, 500, 502, 503, 504, 302, None, "invalid"])
+def test_uncertain_http_response_preserves_reservation(repo, candidate, status_code):
+    class Broker(FakeBroker):
+        def place_order(self, spec):
+            super().place_order(spec)
+            return {"status_code": status_code}
+
+    with pytest.raises(OrderOutcomeUnknownError):
+        submit(repo, candidate, Broker())
+    assert unresolved_unknown_open_order_count(repo) == 1
+    assert pending_open_option_position_count(repo) == 1
+
+
+def test_replacement_gateway_timeout_preserves_uncertainty(repo, candidate):
+    class Broker(FakeBroker):
+        def replace_order(self, order_id, spec):
+            super().replace_order(order_id, spec)
+            return {"status_code": 504}
+
+    broker = Broker()
+    submit(repo, candidate, broker)
+    rows, _ = refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    config = AppConfig()
+    config.risk.dry_run = False
+    message = _adjust_order_price_with_confirmation(
+        None, rows[0], 1.10, config=config, broker=broker, repository=repo,
+        confirm_func=lambda *_: True,
+    )
+    assert "UNKNOWN" in message
+    assert unresolved_unknown_open_order_count(repo) == 1
     refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
     assert pending_open_option_position_count(repo) == 1
