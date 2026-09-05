@@ -1,26 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
-from itertools import zip_longest
 from typing import Any
 
 from .config import AppConfig
 from .models import CandidateShortOption, CandidateStrangle, OrderDraft, RiskCheck
 from .persistence import Repository
-from .position_import import BrokerOptionPosition, parse_option_position
-
-
-@dataclass(frozen=True)
-class BrokerShortStrangleBatch:
-    put: BrokerOptionPosition | None
-    call: BrokerOptionPosition | None
-
-    @property
-    def original_credit(self) -> float:
-        put_credit = self.put.average_price if self.put is not None else None
-        call_credit = self.call.average_price if self.call is not None else None
-        return (put_credit or 0.0) + (call_credit or 0.0)
+from .position_import import parse_option_position
 
 
 _INACTIVE_OPEN_ORDER_STATUSES = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "REPLACED"}
@@ -55,33 +40,6 @@ def assignment_capital_required(candidate: CandidateStrangle, *, quantity: int) 
 
 def candidate_stop_risk(candidate: CandidateStrangle, *, quantity: int, stop_multiple: float) -> float:
     return max(0.0, candidate.estimated_credit_mid * (stop_multiple - 1) * 100 * quantity)
-
-
-def broker_short_strangle_batches(positions: list[dict[str, Any]]) -> list[BrokerShortStrangleBatch]:
-    parsed = [position for position in (parse_option_position(position) for position in positions) if position]
-    shorts = [position for position in parsed if position.side == "SHORT"]
-    grouped: dict[tuple[str, date], list[BrokerOptionPosition]] = {}
-    for position in shorts:
-        grouped.setdefault((position.underlying_symbol, position.expiration), []).append(position)
-
-    batches: list[BrokerShortStrangleBatch] = []
-    for option_positions in grouped.values():
-        puts = _expand_option_units(
-            sorted(
-                [position for position in option_positions if position.option_type == "PUT"],
-                key=lambda position: position.strike,
-                reverse=True,
-            )
-        )
-        calls = _expand_option_units(
-            sorted(
-                [position for position in option_positions if position.option_type == "CALL"],
-                key=lambda position: position.strike,
-            )
-        )
-        for put, call in zip_longest(puts, calls):
-            batches.append(BrokerShortStrangleBatch(put=put, call=call))
-    return batches
 
 
 def broker_option_position_count(positions: list[dict[str, Any]]) -> int:
@@ -217,15 +175,12 @@ def _is_pending_open_order(draft: OrderDraft) -> bool:
     return broker_status != "FILLED" and broker_status not in _INACTIVE_OPEN_ORDER_STATUSES
 
 
-def _expand_option_units(positions: list[BrokerOptionPosition]) -> list[BrokerOptionPosition]:
-    units: list[BrokerOptionPosition] = []
-    for position in positions:
-        units.extend([position] * position.quantity)
-    return units
-
-
-def broker_stop_risk(batches: list[BrokerShortStrangleBatch], *, stop_multiple: float) -> float:
-    return sum(max(0.0, batch.original_credit * (stop_multiple - 1) * 100) for batch in batches)
+def broker_stop_risk(positions: list[dict[str, Any]], *, stop_multiple: float) -> float:
+    return sum(
+        max(0.0, (position.average_price or 0.0) * (stop_multiple - 1) * 100 * position.quantity)
+        for raw in positions
+        if (position := parse_option_position(raw)) is not None and position.side == "SHORT"
+    )
 
 
 def validate_new_trade(
@@ -294,7 +249,6 @@ def _validate_new_open(
     available_covered_shares = max(0.0, covered_shares - reserved_call_shares)
     required_covered_shares = quantity * 100
     call_covered = available_covered_shares >= required_covered_shares
-    live_batches = broker_short_strangle_batches(positions)
     live_option_positions = broker_option_position_count(positions)
     pending_option_positions = pending_open_option_position_count(repository)
     new_option_positions = quantity * leg_count
@@ -332,7 +286,7 @@ def _validate_new_open(
             f"available: {available_covered_shares:g}, needed: {required_covered_shares:g})"
         )
 
-    live_stop_risk = broker_stop_risk(live_batches, stop_multiple=config.strategy.stop_multiple)
+    live_stop_risk = broker_stop_risk(positions, stop_multiple=config.strategy.stop_multiple)
     new_stop_risk = max(
         0.0,
         estimated_credit_mid * (config.strategy.stop_multiple - 1) * 100 * quantity,

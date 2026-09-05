@@ -36,6 +36,7 @@ from option_sentinel.risk import (
     unresolved_unknown_open_order_count,
     validate_new_option_trade,
     submitted_open_order_count,
+    broker_stop_risk,
 )
 
 
@@ -377,3 +378,12 @@ def test_charts_auth_failure_reaches_reauthentication_handler():
     rows = build_monitor_rows(FakeBroker(), config)
     with pytest.raises(RuntimeError, match="invalid_grant"):
         build_intraday_charts(ExpiredBroker(), config, rows)
+
+
+def test_stop_risk_counts_mixed_short_quantities_without_pairing(candidate):
+    positions = [
+        {"instrument": {"symbol": candidate.option.symbol, "assetType": "OPTION"}, "shortQuantity": 3, "averagePrice": 2},
+        {"instrument": {"symbol": f"XYZ_{candidate.expiration + timedelta(days=7):%y%m%d}C120", "assetType": "OPTION"}, "shortQuantity": 2, "averagePrice": 1},
+        {"instrument": {"symbol": candidate.option.symbol, "assetType": "OPTION"}, "longQuantity": 9, "averagePrice": 5},
+    ]
+    assert broker_stop_risk(positions, stop_multiple=3) == 1_600
