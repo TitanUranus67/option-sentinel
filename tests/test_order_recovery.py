@@ -173,3 +173,40 @@ def test_two_unknown_drafts_cannot_share_one_broker_order(repo, candidate):
         repo.add_order_draft(draft(candidate, status="UNKNOWN", created_at=now))
     refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
     assert unresolved_unknown_open_order_count(repo) == 2
+
+
+def test_interrupt_after_acceptance_preserves_uncertainty(repo, candidate):
+    class InterruptedBroker(FakeBroker):
+        def place_order(self, spec):
+            super().place_order(spec)
+            raise KeyboardInterrupt()
+
+    broker = InterruptedBroker()
+    with pytest.raises(KeyboardInterrupt):
+        submit(repo, candidate, broker)
+    assert len(broker.placed_orders) == 1
+    assert unresolved_unknown_open_order_count(repo) == 1, repo.list_order_drafts()[0].status
+
+
+def test_replacement_interruption_keeps_durable_unknown_state(repo, candidate):
+    class Broker(FakeBroker):
+        def replace_order(self, order_id, spec):
+            # The durable record must exist even before the network call returns.
+            fresh_repo = Repository(repo.sqlite_path)
+            assert unresolved_unknown_open_order_count(fresh_repo) == 1
+            super().replace_order(order_id, spec)
+            raise KeyboardInterrupt()
+
+    broker = Broker()
+    submit(repo, candidate, broker)
+    rows, _ = refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    config = AppConfig()
+    config.risk.dry_run = False
+    with pytest.raises(KeyboardInterrupt):
+        _adjust_order_price_with_confirmation(
+            None, rows[0], 1.10, config=config, broker=broker, repository=repo,
+            confirm_func=lambda *_: True,
+        )
+    assert unresolved_unknown_open_order_count(Repository(repo.sqlite_path)) == 1
+    refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    assert pending_open_option_position_count(repo) == 1
