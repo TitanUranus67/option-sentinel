@@ -3,6 +3,7 @@ from __future__ import annotations
 import curses
 import textwrap
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from math import gcd
@@ -49,6 +50,7 @@ from .position_monitor import (
 from .refresh import BrokerRefreshCoordinator
 from .risk import validate_new_option_trade, validate_new_trade
 from .roll import RollCandidate, find_credit_roll_candidates
+from .schwab_auth import is_schwab_auth_error
 from .strategy import find_candidate_short_options, find_candidate_strangles
 from .trading import OrderOutcomeUnknownError, broker_rejection_message, draft_or_submit_order
 
@@ -76,11 +78,23 @@ BROKER_SPINNER_FRAMES = ("|", "/", "-", "\\")
 MOUSE_WHEEL_ROWS = 1
 
 
-def run_monitor_tui(*, config: AppConfig, broker: Broker, repository: Repository) -> None:
-    curses.wrapper(_run, config, broker, repository)
+def run_monitor_tui(
+    *,
+    config: AppConfig,
+    broker: Broker,
+    repository: Repository,
+    reauthenticate: Callable[[], Broker] | None = None,
+) -> None:
+    curses.wrapper(_run, config, broker, repository, reauthenticate)
 
 
-def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: Repository) -> None:
+def _run(
+    stdscr: curses.window,
+    config: AppConfig,
+    broker: Broker,
+    repository: Repository,
+    reauthenticate: Callable[[], Broker] | None = None,
+) -> None:
     curses.curs_set(0)
     _init_colors()
     stdscr.keypad(True)
@@ -111,6 +125,8 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
     last_refresh = 0.0
     last_order_refresh = 0.0
     last_chart_refresh = 0.0
+    auth_retry_armed = True
+    auth_blocked = False
     refresh = BrokerRefreshCoordinator()
 
     try:
@@ -119,6 +135,51 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
             if completed is not None:
                 completed_at = time.monotonic()
                 refreshed_at = datetime.now()
+                if completed.error is not None and is_schwab_auth_error(completed.error):
+                    auth_blocked = True
+                    if reauthenticate is not None and auth_retry_armed:
+                        auth_retry_armed = False
+                        _show_reauthentication_start(stdscr)
+                        try:
+                            broker = _run_reauthentication(stdscr, reauthenticate)
+                        except Exception as exc:
+                            message = f"Schwab reauthentication failed: {exc}. Press r to retry."
+                            status, order_status, chart_status = _set_refresh_error_status(
+                                completed.kind,
+                                message,
+                                status=status,
+                                order_status=order_status,
+                                chart_status=chart_status,
+                            )
+                        else:
+                            auth_retry_armed = True
+                            auth_blocked = False
+                            message = "Schwab login refreshed. Retrying..."
+                            status, order_status, chart_status = _set_refresh_error_status(
+                                completed.kind,
+                                message,
+                                status=status,
+                                order_status=order_status,
+                                chart_status=chart_status,
+                            )
+                            if completed.kind == REFRESH_MONITOR:
+                                force_refresh = True
+                            elif completed.kind == REFRESH_ORDERS:
+                                force_order_refresh = True
+                            elif completed.kind == REFRESH_CHARTS:
+                                force_chart_refresh = True
+                        dirty = True
+                        continue
+                    message = "Schwab login expired. Press r to start reauthentication."
+                    status, order_status, chart_status = _set_refresh_error_status(
+                        completed.kind,
+                        message,
+                        status=status,
+                        order_status=order_status,
+                        chart_status=chart_status,
+                    )
+                    dirty = True
+                    continue
                 if completed.kind == REFRESH_MONITOR:
                     last_refresh = completed_at
                     if completed.error is not None:
@@ -163,7 +224,7 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 dirty = True
 
             now = time.monotonic()
-            if not refresh.waiting:
+            if not refresh.waiting and not auth_blocked:
                 if active_tab == TAB_MONITOR and (
                     force_refresh or last_refresh == 0.0 or now - last_refresh >= config.strategy.poll_seconds
                 ):
@@ -321,6 +382,8 @@ def _run(stdscr: curses.window, config: AppConfig, broker: Broker, repository: R
                 dirty = True
                 continue
             if key == ord("r"):
+                auth_retry_armed = True
+                auth_blocked = False
                 if active_tab == TAB_MONITOR and refresh.waiting_kind != REFRESH_MONITOR:
                     force_refresh = True
                 elif active_tab == TAB_ORDERS and refresh.waiting_kind != REFRESH_ORDERS:
@@ -467,6 +530,57 @@ def _order_refresh_status(
 def _broker_busy_message(waiting_kind: str | None) -> str:
     target = waiting_kind or "refresh"
     return f"Broker is busy refreshing {target}; try again when the broker spinner clears."
+
+
+def _set_refresh_error_status(
+    kind: str,
+    message: str,
+    *,
+    status: str,
+    order_status: str,
+    chart_status: str,
+) -> tuple[str, str, str]:
+    if kind == REFRESH_ORDERS:
+        order_status = message
+    elif kind == REFRESH_CHARTS:
+        chart_status = message
+    else:
+        status = message
+    return status, order_status, chart_status
+
+
+def _show_reauthentication_start(stdscr: curses.window) -> None:
+    stdscr.erase()
+    _, width = stdscr.getmaxyx()
+    _add_line(stdscr, 0, 0, "Schwab login expired.", width, curses.A_BOLD)
+    _add_line(stdscr, 2, 0, "Opening Schwab reauthentication in your browser...", width)
+    _add_line(stdscr, 3, 0, "Complete the login to resume OptionSentinel.", width)
+    stdscr.refresh()
+
+
+def _run_reauthentication(stdscr: curses.window, reauthenticate: Callable[[], Broker]) -> Broker:
+    terminal_suspended = False
+    try:
+        curses.def_prog_mode()
+        curses.endwin()
+        terminal_suspended = True
+    except curses.error:
+        pass
+    try:
+        return reauthenticate()
+    finally:
+        if terminal_suspended:
+            try:
+                curses.reset_prog_mode()
+            except curses.error:
+                pass
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        stdscr.keypad(True)
+        stdscr.timeout(250)
+        stdscr.refresh()
 
 
 def _draw(
@@ -1783,13 +1897,12 @@ def _symbol_implied_volatility(broker: Broker, config: AppConfig, symbol: str) -
 
 
 def _is_broker_auth_error(error: Exception) -> bool:
-    message = f"{type(error).__name__}: {error}".lower()
-    return "invalid_grant" in message or "refresh token is invalid, expired or revoked" in message
+    return is_schwab_auth_error(error)
 
 
 def _symbol_iv_error_message(error: Exception) -> str:
     if _is_broker_auth_error(error):
-        return "Schwab login expired. Run option-sentinel auth --overwrite-token."
+        return "Schwab login expired. Return to the monitor to reauthenticate."
     return f"IV lookup failed: {type(error).__name__}"
 
 

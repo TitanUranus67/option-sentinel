@@ -1412,7 +1412,7 @@ def test_stock_selector_surfaces_expired_login_and_stops_iv_lookups(monkeypatch)
     )
     refresh.close()
 
-    expected_error = "Schwab login expired. Run option-sentinel auth --overwrite-token."
+    expected_error = "Schwab login expired. Return to the monitor to reauthenticate."
     assert selected is None
     assert broker.calls == ["NVDA"]
     assert drawn_errors[-1] == {"NVDA": expected_error, "TSLA": expected_error}

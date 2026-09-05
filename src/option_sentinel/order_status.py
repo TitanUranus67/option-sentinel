@@ -9,6 +9,7 @@ from typing import Any
 from .broker import Broker
 from .models import OrderDraft
 from .persistence import Repository
+from .schwab_auth import is_schwab_auth_error
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,8 @@ def refresh_order_status_rows(
     try:
         live_orders = get_orders(from_entered_datetime=start, to_entered_datetime=end)
     except Exception as exc:
+        if is_schwab_auth_error(exc):
+            raise
         return [_stored_order_status_row(draft) for draft in drafts], f"live status failed: {exc}"
 
     return merge_order_status_rows(drafts, live_orders, repository=repository), None
