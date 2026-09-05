@@ -132,3 +132,44 @@ def test_replacement_never_uses_original_as_its_own_id(repo, candidate, accepted
     else:
         assert replacement.broker_order_id is None
         assert unresolved_unknown_open_order_count(repo) == 1
+
+
+def test_unknown_submission_not_matched_to_another_drafts_canceled_order(repo, candidate):
+    broker = FakeBroker()
+    now = datetime.now(timezone.utc)
+    broker.order_records.append({
+        **order(candidate), "orderId": "OLD", "status": "CANCELED",
+        "enteredTime": (now-timedelta(minutes=5)).isoformat(),
+    })
+    repo.add_order_draft(draft(
+        candidate, broker_order_id="OLD", broker_status="CANCELED",
+        created_at=now-timedelta(minutes=5),
+    ))
+    repo.add_order_draft(draft(candidate, status="UNKNOWN", created_at=now))
+    refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    assert unresolved_unknown_open_order_count(repo) == 1
+
+
+@pytest.mark.parametrize("entered_offset", [None, -60, 3600])
+def test_unknown_order_requires_plausible_entry_time(repo, candidate, entered_offset):
+    broker = FakeBroker()
+    now = datetime.now(timezone.utc)
+    record = {**order(candidate), "orderId": "UNCLAIMED", "status": "CANCELED"}
+    if entered_offset is not None:
+        record["enteredTime"] = (now + timedelta(seconds=entered_offset)).isoformat()
+    broker.order_records.append(record)
+    repo.add_order_draft(draft(candidate, status="UNKNOWN", created_at=now))
+    refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    assert unresolved_unknown_open_order_count(repo) == 1
+
+
+def test_two_unknown_drafts_cannot_share_one_broker_order(repo, candidate):
+    broker = FakeBroker()
+    now = datetime.now(timezone.utc)
+    broker.order_records.append({
+        **order(candidate), "orderId": "ONE", "status": "FILLED", "enteredTime": now.isoformat(),
+    })
+    for _ in range(2):
+        repo.add_order_draft(draft(candidate, status="UNKNOWN", created_at=now))
+    refresh_order_status_rows(repo.list_order_drafts(), broker, repo)
+    assert unresolved_unknown_open_order_count(repo) == 2
