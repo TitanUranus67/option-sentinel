@@ -70,6 +70,8 @@ def find_candidate_strangles(
     as_of: date | None = None,
     earnings_date: date | None = None,
     limit: int | None = None,
+    put_ratio: int = 1,
+    call_ratio: int = 1,
 ) -> list[CandidateStrangle]:
     current = as_of or date.today()
     liquid_contracts = filter_liquid_contracts(chain.contracts, config.risk.max_bid_ask_spread_pct)
@@ -118,8 +120,10 @@ def find_candidate_strangles(
                 dte=dte,
                 put=put,
                 call=call,
-                estimated_credit_bid=round(put.bid + call.bid, 4),
-                estimated_credit_mid=round(put.mid + call.mid, 4),
+                put_ratio=put_ratio,
+                call_ratio=call_ratio,
+                estimated_credit_bid=round(put.bid * put_ratio + call.bid * call_ratio, 4),
+                estimated_credit_mid=round(put.mid * put_ratio + call.mid * call_ratio, 4),
                 notes=notes,
                 earnings_within_window=earnings_within_window,
             )

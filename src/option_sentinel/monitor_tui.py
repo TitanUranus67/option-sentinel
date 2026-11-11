@@ -65,7 +65,8 @@ COLOR_STOP_LOSS = 1
 COLOR_TAKE_PROFIT = 2
 OPEN_CANDIDATE_LIMIT = 12
 OPEN_QUANTITY = 1
-OPEN_STRATEGIES = ("STRANGLE", "PUT", "CALL")
+TWO_PUTS_ONE_CALL = "2 PUTS 1 CALL"
+OPEN_STRATEGIES = ("STRANGLE", "PUT", "CALL", TWO_PUTS_ONE_CALL)
 ORDER_DRAFT_LIMIT = 100
 FULL_MONITOR_WIDTH = 108
 SYMBOL_DELTA_SIDEBAR_WIDTH = 39
@@ -1546,9 +1547,20 @@ def _open_new_trade(
     return status
 
 
+def _open_strategy_config(config: AppConfig, strategy: str) -> AppConfig:
+    if strategy != TWO_PUTS_ONE_CALL:
+        return config
+    return config.model_copy(update={
+        "strategy": config.strategy.model_copy(update={
+            "dte_min": 23, "dte_max": 30, "put_delta": 0.16, "call_delta": 0.16,
+        }),
+    })
+
+
 def _open_candidates(
     *, config: AppConfig, broker: Broker, symbol: str, strategy: str
 ) -> list[CandidateStrangle] | list[CandidateShortOption]:
+    config = _open_strategy_config(config, strategy)
     normalized = symbol.upper()
     today = date.today()
     chain = broker.get_option_chain(
@@ -1558,13 +1570,14 @@ def _open_candidates(
     )
     quotes = broker.get_quotes([normalized])
     earnings_date = _earnings_date_from_quotes(quotes, normalized)
-    if strategy == "STRANGLE":
+    if strategy in {"STRANGLE", TWO_PUTS_ONE_CALL}:
         return find_candidate_strangles(
             chain,
             config,
             as_of=today,
             earnings_date=earnings_date,
             limit=OPEN_CANDIDATE_LIMIT,
+            put_ratio=2 if strategy == TWO_PUTS_ONE_CALL else 1,
         )
     return find_candidate_short_options(
         chain,
@@ -1627,8 +1640,16 @@ def _open_candidate_with_confirmation(
 
     if isinstance(candidate, CandidateStrangle):
         order = build_open_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
-        strategy_label = "short strangle"
-        leg_line = f"Sell put {candidate.put.strike:g} and call {candidate.call.strike:g}"
+        strategy_label = (
+            "short strangle" if candidate.put_ratio == candidate.call_ratio == 1
+            else f"short {candidate.put_ratio} puts {candidate.call_ratio} call"
+        )
+        leg_line = (
+            f"Sell {quantity * candidate.put_ratio} put @ {candidate.put.strike:g} "
+            f"(delta {candidate.put.delta:.3f}) and "
+            f"{quantity * candidate.call_ratio} call @ {candidate.call.strike:g} "
+            f"(delta {candidate.call.delta:.3f})"
+        )
         risk_line = f"Assignment capital {risk.assignment_capital:,.0f}  Call covered: {risk.call_covered}"
     else:
         order = build_open_option_order(candidate, quantity=quantity, limit_credit=candidate.estimated_credit_mid)
@@ -1720,14 +1741,14 @@ def _select_open_strategy(stdscr: curses.window) -> str | None:
 
 def _draw_open_strategy_popup(stdscr: curses.window, *, selected_index: int) -> None:
     height, width = stdscr.getmaxyx()
-    if height < 9 or width < 34:
+    box_height = len(OPEN_STRATEGIES) + 6
+    if height < box_height or width < 34:
         stdscr.erase()
         _add_line(stdscr, 0, 0, "Terminal too small for strategy selector.", width)
         stdscr.refresh()
         return
 
     box_width = min(38, width - 4)
-    box_height = 9
     top = max(0, (height - box_height) // 2)
     left = max(0, (width - box_width) // 2)
     horizontal = "-" * (box_width - 2)
@@ -1746,7 +1767,7 @@ def _draw_open_strategy_popup(stdscr: curses.window, *, selected_index: int) -> 
             box_width - 4,
             selected=selected_index == offset,
         )
-    _add_line(stdscr, top + 7, left + 2, "Enter selects. Esc cancels.", box_width - 4)
+    _add_line(stdscr, top + box_height - 2, left + 2, "Enter selects. Esc cancels.", box_width - 4)
     stdscr.refresh()
 
 
@@ -2063,6 +2084,7 @@ def _draw_open_candidates(
     selected_index: int | None = None,
     scroll: int = 0,
 ) -> None:
+    config = _open_strategy_config(config, strategy)
     height, width = stdscr.getmaxyx()
     if height < 8 or width < 48:
         stdscr.erase()
@@ -2091,7 +2113,7 @@ def _draw_open_candidates(
     target_delta = config.strategy.put_delta if strategy == "PUT" else config.strategy.call_delta
     delta_targets = (
         f"put delta {config.strategy.put_delta:.2f}, call delta {config.strategy.call_delta:.2f}"
-        if strategy == "STRANGLE"
+        if strategy in {"STRANGLE", TWO_PUTS_ONE_CALL}
         else f"{strategy.lower()} delta {target_delta:.2f}"
     )
     _add_line(
@@ -2116,7 +2138,7 @@ def _draw_open_candidates(
             curses.A_BOLD,
         )
     else:
-        if strategy == "STRANGLE":
+        if strategy in {"STRANGLE", TWO_PUTS_ONE_CALL}:
             header = f"{'Exp':<10} {'DTE':>4} {'Put':>8} {'PDel':>7} {'Call':>8} {'CDel':>7} {'BidCr':>7} {'MidCr':>7}"
         else:
             header = (

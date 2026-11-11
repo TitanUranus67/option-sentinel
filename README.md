@@ -22,7 +22,7 @@ OptionSentinel is independent and is not affiliated with or endorsed by Charles 
 - Scan configured symbols for liquid short-strangle, put, or call candidates by DTE and delta.
 - Develop and test without brokerage access using the deterministic fake broker.
 
-The monitor, order dashboard, risk accounting, and charts are strategy-neutral. The interactive sell-to-open workflow supports strangles and standalone puts or calls. Legacy import and paired-trade tracking remain explicitly strangle-specific.
+The monitor, order dashboard, risk accounting, and charts are strategy-neutral. The interactive sell-to-open workflow supports strangles, standalone puts or calls, and a **2 puts 1 call** preset. That preset sells two contracts at the selected put strike and one at the selected call strike, targeting 0.16 absolute delta on both sides and a shared expiration 23–30 days out. Credits are per three-contract unit. Legacy import and paired-trade tracking remain explicitly strangle-specific.
 
 ## Safety model
 
@@ -68,7 +68,7 @@ option-sentinel monitor --once
 option-sentinel strangle scan --broker fake
 ```
 
-Press `F1` for positions, `F2` for orders, and `F3` for charts. Use `q` to quit and `r` to refresh. In F1, select an option and press Enter for close or roll actions; press `n` to choose a short strangle, put, or call to sell to open.
+Press `F1` for positions, `F2` for orders, and `F3` for charts. Use `q` to quit and `r` to refresh. In F1, select an option and press Enter for close or roll actions; press `n` to choose a short strangle, put, call, or **2 puts 1 call** to sell to open.
 
 If the Schwab refresh token expires while the interactive dashboard is running, OptionSentinel automatically opens the OAuth login flow and resumes the interrupted refresh after authentication succeeds. If login is canceled or fails, the dashboard stays open; press `r` to try again.
 

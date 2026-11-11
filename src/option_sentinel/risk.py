@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import gcd
 from typing import Any
 
 from .config import AppConfig
@@ -144,12 +145,13 @@ def pending_open_stop_risk(repository: Repository, *, stop_multiple: float) -> f
     for draft in _submitted_open_order_drafts(repository):
         if not _is_pending_open_order(draft):
             continue
-        # Supported opens have equal leg quantities and a per-unit net credit.
-        quantity = max(
-            (float(leg.get("quantity", 0)) for leg in draft.order_json.get("orderLegCollection") or []
-             if isinstance(leg, dict) and str(leg.get("instruction") or "").upper() == "SELL_TO_OPEN"),
-            default=0,
-        )
+        # Net credit is per strategy unit, including orders with unequal leg quantities.
+        leg_quantities = [
+            int(float(leg.get("quantity", 0)))
+            for leg in draft.order_json.get("orderLegCollection") or []
+            if isinstance(leg, dict) and str(leg.get("instruction") or "").upper() == "SELL_TO_OPEN"
+        ]
+        quantity = float(draft.order_json.get("quantity") or gcd(*leg_quantities))
         total += max(0.0, draft.estimated_price * (stop_multiple - 1) * 100 * quantity)
     return total
 
@@ -189,7 +191,9 @@ def validate_new_trade(
         put_strike=candidate.put.strike,
         includes_call=True,
         estimated_credit_mid=candidate.estimated_credit_mid,
-        leg_count=2,
+        leg_count=candidate.put_ratio + candidate.call_ratio,
+        put_contracts_per_unit=candidate.put_ratio,
+        call_contracts_per_unit=candidate.call_ratio,
         quantity=quantity,
         config=config,
         repository=repository,
@@ -231,15 +235,17 @@ def _validate_new_open(
     config: AppConfig,
     repository: Repository,
     positions: list[dict[str, Any]],
+    put_contracts_per_unit: int = 1,
+    call_contracts_per_unit: int = 1,
 ) -> RiskCheck:
     messages: list[str] = []
-    assignment_capital = (put_strike or 0.0) * 100 * quantity
+    assignment_capital = (put_strike or 0.0) * 100 * quantity * put_contracts_per_unit
     covered_shares = share_quantity(positions, symbol)
     reserved_call_contracts = broker_short_call_contract_count(positions, symbol)
     reserved_call_contracts += pending_short_call_contract_count(repository, symbol)
     reserved_call_shares = reserved_call_contracts * 100
     available_covered_shares = max(0.0, covered_shares - reserved_call_shares)
-    required_covered_shares = quantity * 100
+    required_covered_shares = quantity * 100 * call_contracts_per_unit
     call_covered = available_covered_shares >= required_covered_shares
     live_option_positions = broker_option_position_count(positions)
     pending_option_positions = pending_open_option_position_count(repository)

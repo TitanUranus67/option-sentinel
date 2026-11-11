@@ -45,11 +45,13 @@ def build_open_order(candidate: CandidateStrangle, *, quantity: int, limit_credi
         "duration": "DAY",
         "quantity": quantity,
         "orderStrategyType": "SINGLE",
-        "complexOrderStrategyType": "STRANGLE",
+        "complexOrderStrategyType": (
+            "STRANGLE" if candidate.put_ratio == candidate.call_ratio == 1 else "CUSTOM"
+        ),
         "orderLegCollection": [
             {
                 "instruction": "SELL_TO_OPEN",
-                "quantity": quantity,
+                "quantity": quantity * candidate.put_ratio,
                 "instrument": {
                     "symbol": candidate.put.symbol,
                     "assetType": "OPTION",
@@ -57,7 +59,7 @@ def build_open_order(candidate: CandidateStrangle, *, quantity: int, limit_credi
             },
             {
                 "instruction": "SELL_TO_OPEN",
-                "quantity": quantity,
+                "quantity": quantity * candidate.call_ratio,
                 "instrument": {
                     "symbol": candidate.call.symbol,
                     "assetType": "OPTION",

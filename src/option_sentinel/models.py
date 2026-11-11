@@ -46,6 +46,8 @@ class CandidateStrangle(BaseModel):
     dte: int
     put: OptionContract
     call: OptionContract
+    put_ratio: int = Field(1, ge=1)
+    call_ratio: int = Field(1, ge=1)
     estimated_credit_bid: float
     estimated_credit_mid: float
     notes: list[str] = Field(default_factory=list)
